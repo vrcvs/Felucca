@@ -16,8 +16,9 @@ Every file in this tree that carries an `SPDX-License-Identifier: GPL-3.0-only` 
 - the web pages (installer, editor, the browser emulator `web/emu/`) and their tests: `web/` (not the Fukiai and DotGothic16 fonts, below)
 - the host tests: `tests/`
 
-Three source files are ports and keep the licence of their originals:
-`firmware/src/phys_dsp.c` (DaisySP, MIT), `firmware/src/phys_symp.c` (Rings, MIT) and
+Four source files are ports and keep the licence of their originals:
+`firmware/src/phys_dsp.c` (DaisySP, MIT), `firmware/src/phys_symp.c` and `firmware/src/rings_dsp.c` (Rings, MIT:
+the resonator models and Disastrous Peace, in fixed point; `tools/gen_rings_tables.py` writes its tables from Rings' curves) and
 `firmware/src/fm6_core.c` (msfa, Apache-2.0). The firmware built with them is GPL-3.0-only as
 a whole.
 

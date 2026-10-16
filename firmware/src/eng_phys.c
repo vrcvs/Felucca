@@ -40,12 +40,16 @@
  * Cost (host, 8 notes asked = 3 voices): see the README and cpu_baseline.txt. */
 #include "phys_dsp.c"
 #include "phys_symp.c"
+#include "rings_dsp.c"
 
-enum { PM_MODAL, PM_STRING, PM_MEMB, PM_SYMP, PM_COUNT };
+/* PM_MODAL .. PM_SYMP: DaisySP's and Rings' sympathetic strings in a voice each; PM_R*: Rings' models whole (rings_dsp.c:
+ * one part-wide set of voices, below) */
+enum { PM_MODAL, PM_STRING, PM_MEMB, PM_SYMP, PM_RMODAL, PM_RSYMP, PM_RSTRING, PM_RFM, PM_RQUANT, PM_RSTRREV, PM_RDISP, PM_COUNT };
+#define PM_RINGS PM_RMODAL
 #define PHYS_POLY 3
 /* output: model 1.0 -> this (VOICE_FS scale), then a soft knee; per model (a strike of all the modes in
  * phase peaks high but is short) */
-static const int32_t PHYS_GAIN[PM_COUNT] = {28000, 12000, 90000, 12000};
+static const int32_t PHYS_GAIN[PM_COUNT] = {28000, 12000, 90000, 12000, 24000, 24000, 24000, 24000, 24000, 24000, 24000};
 
 typedef struct {
     uint8_t model;               /* PM_* the state belongs to */
@@ -58,7 +62,9 @@ typedef struct {
 
 ENG_MEM_FITS("PHYS", sizeof(phys_slot_t) * PHYS_POLY);   /* (it sets ENG_MEM_PART) */
 
-static const char *const N_PHYS_MODEL[] = {"MODAL", "STRNG", "MEMB", "SYMP"};
+static const char *const N_PHYS_MODEL[] = {"MODAL", "STRNG", "MEMB", "SYMP", "R.MOD", "R.SYM", "R.STR", "R.FM", "R.QNT", "R.S+R", "R.DSP"};
+static const char *const N_PHYS_POLY[] = {"1", "2", "4", 0};
+static const char *const N_PHYS_FX[] = {"FORM", "CHOR", "REVB", "FOR2", "ENSM", "REV2", 0};
 static const char *const N_PHYS_CHORD[] = {"OCT", "5TH", "4TH", "MAJ", "MIN", "SUS", "7TH", "ROOT", 0};
 /* per model: STRC .. EXC under their own names (phys_desc; range and default as edit[], 0 = edit[]) */
 static const param_desc_t PHYS_D_HARM = {"HARM", F_PCT, 0, 127, 64, 0, 0};
@@ -66,7 +72,24 @@ static const param_desc_t PHYS_D_BEND = {"BEND", F_PCT, 0, 127, 0, 0, 0};
 static const param_desc_t PHYS_D_CHRD = {"CHRD", F_INT, 0, 127, 64, N_PHYS_CHORD, 0};
 static const param_desc_t PHYS_D_SYMP = {"SYMP", F_PCT, 0, 127, 20, 0, 0};
 static const param_desc_t PHYS_D_BUZZ = {"BUZZ", F_PCT, 0, 127, 0, 0, 0};
+static const param_desc_t PHYS_D_STRU = {"STRU", F_PCT, 0, 127, 64, 0, 0};
+static const param_desc_t PHYS_D_POLY = {"POLY", F_ENUM, 0, 2, 0, N_PHYS_POLY, 0};
+static const param_desc_t PHYS_D_CH11 = {"CHRD", F_INT, 0, 10, 0, 0, 0};
+static const param_desc_t PHYS_D_TONC = {"TONC", F_INT, 0, 127, 0, 0, 0};   /* 0 = a fourth below the first note */
+static const param_desc_t PHYS_D_TUNE = {"TUNE", F_SEMI, -12, 12, 0, 0, 0};
+static const param_desc_t PHYS_D_FX = {"FX", F_ENUM, 0, 5, 0, N_PHYS_FX, 0};
+static const param_desc_t PHYS_D_BRIG = {"BRIG", F_PCT, 0, 127, 64, 0, 0};
+static const param_desc_t PHYS_D_DAMP = {"DAMP", F_PCT, 0, 127, 64, 0, 0};
+static const param_desc_t PHYS_D_POSN = {"POSN", F_PCT, 0, 127, 64, 0, 0};
+#define PHYS_RDESC(e5, e6, e7) {0, &PHYS_D_STRU, &PHYS_D_BRIG, &PHYS_D_DAMP, &PHYS_D_POSN, e5, e6, e7}
 static const param_desc_t *const PHYS_DESC[PM_COUNT][8] = {
+    [PM_RMODAL] = PHYS_RDESC(&PHYS_D_POLY, 0, &PHYS_D_TUNE),
+    [PM_RSYMP] = PHYS_RDESC(&PHYS_D_POLY, &PHYS_D_TONC, &PHYS_D_TUNE),
+    [PM_RSTRING] = PHYS_RDESC(&PHYS_D_POLY, 0, &PHYS_D_TUNE),
+    [PM_RFM] = PHYS_RDESC(&PHYS_D_POLY, 0, &PHYS_D_TUNE),
+    [PM_RQUANT] = PHYS_RDESC(&PHYS_D_POLY, &PHYS_D_CH11, &PHYS_D_TUNE),
+    [PM_RSTRREV] = PHYS_RDESC(&PHYS_D_POLY, 0, &PHYS_D_TUNE),
+    [PM_RDISP] = {0, 0, &PHYS_D_BRIG, &PHYS_D_DAMP, &PHYS_D_POSN, &PHYS_D_POLY, &PHYS_D_CH11, &PHYS_D_FX},
     [PM_MEMB] = {0, &PHYS_D_HARM, 0, 0, 0, 0, &PHYS_D_BEND, 0},
     [PM_SYMP] = {0, &PHYS_D_CHRD, 0, 0, &PHYS_D_SYMP, 0, &PHYS_D_BUZZ, 0},
 };
@@ -92,6 +115,7 @@ static void phys_legacy(int16_t *e)
     }
 }
 
+static void phys_rg_note_on(track_t *t, voice_t *v);
 static phys_slot_t *phys_slot_of(track_t *t, voice_t *v)
 {
     uint32_t i;
@@ -132,6 +156,10 @@ static void phys_note_on(track_t *t, voice_t *v)
 {
     phys_slot_t *S = phys_slot_of(t, v);
     uint32_t md = (uint32_t)t->p[P_E0] % PM_COUNT;
+    if (md >= PM_RINGS) {
+        phys_rg_note_on(t, v);
+        return;
+    }
     if (!S)
         return;
     if ((!v->env && !v->env_out) || S->model != md)     /* a fresh voice (not a retrigger): from rest */
@@ -159,11 +187,177 @@ static __attribute__((noinline)) void phys_symp_pitches(const track_t *t, const 
     }
 }
 
+
+/* ------------------------------------------------------ Rings' models --- */
+/* PM_R*: Rings' resonators and string synth (rings_dsp.c), whole. The state (about 32 KB) is one arena for the whole
+ * device, owned by one part at a time (the last to play a Rings model; its eng_mem is not used): a part plays them
+ * with the voice that last started a note as the carrier of the whole sound (the other voices of the part render
+ * nothing), because Rings' voices are its own: a strum goes to the next of POLY (1, 2, 4) voices of the model, the
+ * earlier ones ring on. The carrier's ADSR and velocity shape the sum. */
+typedef struct {
+    uint8_t owner;               /* part + 1, 0 = nobody */
+    uint8_t model;               /* PM_* */
+    uint8_t next;                /* the voice the next strum goes to (round robin) */
+    uint8_t strum;               /* bit k: voice k is struck in the next block (the string synth: bit 0) */
+    uint8_t vset;                /* bit k: voice k has had a note */
+    uint8_t last;                /* the voice of the latest strum */
+    const voice_t *car;          /* the carrier */
+    int32_t vp16[RG_MAXV];       /* the voices' pitch, 1/16 semitone */
+    int32_t tonic;               /* the sympathetic strings' reference note, MIDI Q16, -1 = not set */
+    rg_lim_t lim;
+    union {
+        rg_modset_t m;
+        rg_strset_t s;
+        rg_fmset_t f;
+        rg_dpset_t d;
+    } u;
+} phys_rg_t;
+static phys_rg_t phys_rg __attribute__((section(".pool")));
+_Static_assert(sizeof(phys_rg_t) <= 32768u + 256u, "Rings' arena over 32 KiB: the pool's headroom (tools/build.py)");
+
+static void phys_rg_reset(uint32_t part, uint32_t md)
+{
+    uint32_t i, *w = (uint32_t *)&phys_rg, seed = (uint32_t)rng();
+    for (i = 0; i < sizeof phys_rg / 4u; i++)
+        w[i] = 0;
+    phys_rg.owner = (uint8_t)(part + 1u);
+    phys_rg.model = (uint8_t)md;
+    phys_rg.tonic = -1;
+    phys_rg.lim.peak = RG_ONE / 2;
+    switch (md - PM_RINGS) {
+    case RG_MODAL:
+    case RG_FM:
+        break;
+    case RG_DP:
+        rg_dp_init(&phys_rg.u.d);
+        break;
+    default:
+        if (md - PM_RINGS == RG_STRREV)
+            rg_rev_init(&phys_rg.u.s.rev, RG_RVBUF(&phys_rg.u.s));
+        for (i = 0; i < RG_MAXV; i++) {
+            phys_rg.u.s.pl[i].rng = 0x2545F491u * (seed * 7u + i + 1u) | 1u;
+            phys_rg.u.s.s[i].rng = 0x9E3779B9u * (seed * 5u + i + 3u) | 1u;
+        }
+        break;
+    }
+}
+
+static uint32_t phys_rg_poly(const track_t *t)
+{
+    int32_t k = t->p[P_E5];
+    return k <= 0 ? 1u : k == 1 ? 2u : 4u;
+}
+
+static void phys_rg_note_on(track_t *t, voice_t *v)
+{
+    uint32_t part = (uint32_t)(t - trk), md = (uint32_t)t->p[P_E0] % PM_COUNT, k, busy = 0, poly = phys_rg_poly(t);
+    phys_rg_t *A = &phys_rg;
+    if (part >= NPART)
+        return;
+    for (k = 0; k < NVOICE; k++)
+        busy += &t->v[k] != v && t->v[k].active;
+    if (A->owner != part + 1u || A->model != md || (!busy && !v->env && !v->env_out))   /* another part's or a silent start: clean */
+        phys_rg_reset(part, md);
+    A->car = v;
+    if (md == PM_RDISP) {
+        A->strum |= 1u;
+        A->vp16[0] = v->pitch16;
+        A->last = 0;
+        return;
+    }
+    A->next = (uint8_t)((A->next + 1u) % poly);
+    k = A->next;
+    A->strum |= (uint8_t)(1u << k);
+    A->vset |= (uint8_t)(1u << k);
+    A->vp16[k] = v->pitch16;
+    A->last = (uint8_t)k;
+    if (A->tonic < 0)
+        A->tonic = (int32_t)(t->p[P_E6] > 0 && md == PM_RSYMP ? t->p[P_E6] * 65536 : v->pitch16 * 4096 - 5 * 65536);
+}
+
+static void phys_rg_render(track_t *t, voice_t *v, int32_t *out, uint32_t n, const vmod_t *m)
+{
+    const int16_t *p = t->p;
+    phys_rg_t *A = &phys_rg;
+    uint32_t part = (uint32_t)(t - trk), md = (uint32_t)p[P_E0] % PM_COUNT, poly = phys_rg_poly(t), i, k, rm = md - PM_RINGS;
+    int32_t acc[CTL] = {0}, g = PHYS_GAIN[md], tune = p[P_E7] * 16;
+    rg_patch_t P;
+    if (part >= NPART || A->car != v || A->owner != part + 1u)   /* (another part took the arena: this one is silent; only a note on takes it) */
+        return;
+    if (A->model != md)                                  /* MODEL changed under a sounding note */
+        phys_rg_reset(part, md);
+    if (n > CTL)
+        n = CTL;
+    P.structure = clamp(p[P_E1] * 516, 0, 65536);
+    P.brightness = clamp(p[P_E2] * 516, 0, 65536);
+    P.damping = clamp(p[P_E3] * 516, 0, 65536);
+    P.position = clamp(p[P_E4] * 516, 0, 65536);
+    P.poly = (int32_t)poly;
+    P.chord = p[P_E6] > 10 ? 10 : p[P_E6] < 0 ? 0 : p[P_E6];
+    P.fx = p[P_E7] > 5 ? 5 : p[P_E7] < 0 ? 0 : p[P_E7];
+    P.tonic = A->tonic < 0 ? 0 : A->tonic;
+    if (md == PM_RDISP) {
+        int32_t mono[CTL] = {0};
+        P.f = 0;
+        P.voice = 0;
+        P.note = m->pitch16 * 4096;
+        rg_dp_run(&A->u.d, &P, (A->strum & 1u) != 0, mono, n);
+        A->strum = 0;
+        for (i = 0; i < n; i++)
+            acc[i] = mono[i];
+    } else {
+        if (A->vset >> A->last & 1u)
+            A->vp16[A->last] = m->pitch16;               /* the latest voice follows the bend and the glide */
+        for (k = 0; k < poly; k++) {
+            int32_t y[CTL] = {0}, p16 = A->vp16[k] + tune;
+            int st = A->strum >> k & 1u;
+            if (!(A->vset >> k & 1u))
+                continue;
+            P.f = pitch_inc((uint32_t)clamp(p16, 0, 2047));
+            P.voice = (int32_t)k;
+            P.note = p16 * 4096;
+            switch (rm) {
+            case RG_MODAL: {
+                rg_modal_blk_t B;
+                rg_modal_block(&B, &A->u.m.m[k], &P, st);
+                rg_modal_run(&B, &A->u.m.m[k], y, n);
+                break;
+            }
+            case RG_FM:
+                rg_fmv_run(&A->u.f, &P, st, y, n);
+                break;
+            default:
+                rg_strv_run(&A->u.s, &P, (int)rm, st, y, n);
+                break;
+            }
+            for (i = 0; i < n; i++)
+                acc[i] += y[i];
+        }
+        A->strum = 0;
+        if (rm == RG_MODAL || rm == RG_FM)
+            rg_lim_run(&A->lim, acc, n, RG_GAIN[rm]);
+        else
+            rg_post(&A->u.s, &A->lim, (int)rm, &P, acc, n);
+    }
+    for (i = 0; i < n; i++) {
+        int32_t s = px_m(acc[i], g, 20), a = s < 0 ? -s : s;
+        if (a > 24000) {                                 /* soft knee */
+            a = 24000 + (softclip(clamp(a - 24000, 0, 1 << 20) * 2) >> 1);
+            s = s < 0 ? -a : a;
+        }
+        out[i] += voice_amp(s, m, i) << 1;
+    }
+}
+
 static void phys_render(track_t *t, voice_t *v, int32_t *out, uint32_t n, const vmod_t *m)
 {
     const int16_t *p = t->p;
     phys_slot_t *S = phys_slot_of(t, v);
     uint32_t md = (uint32_t)p[P_E0] % PM_COUNT, i, f0 = m->inc;
+    if (md >= PM_RINGS) {
+        phys_rg_render(t, v, out, n, m);
+        return;
+    }
     int32_t y[CTL], ax[CTL];
     int32_t strc = p[P_E1] * 516, brit = clamp(p[P_E2] * 516 + m->cutoff * 2, 0, 65536);   /* Q16 0..1 */
     int32_t damp = p[P_E3] * 516, pos = p[P_E4], exc = p[P_E7] * 258;   /* exc Q15 */
@@ -233,6 +427,14 @@ static const preset_t PHYS_PRESETS[] = {
     /* SYMP: {MODEL, CHRD, BRIT, DAMP, SYMP, ACC, BUZZ, EXC} */
     {"DRONE STRING", {PM_SYMP, 127, 80, 88, 64, 100, 92, 0}, {0, 100, 127, 90}, 0, 0, FX(0, 10, 20, 50), PAT(3)},
     {"HARP", {PM_SYMP, 8, 62, 74, 60, 90, 0, 0}, {0, 100, 127, 80}, 0, 0, FX(0, 20, 20, 60), PAT(3)},
+    /* Rings' models: {MODEL, STRU, BRIG, DAMP, POSN, POLY (0 1, 1 2, 2 4), CHRD / TONC, TUNE / FX} */
+    {"R MODAL", {PM_RMODAL, 64, 70, 80, 40, 0, 0, 0}, {0, 100, 127, 90}, 0, 0, FX(0, 10, 20, 50), PAT(3)},
+    {"R SYMPATHETIC", {PM_RSYMP, 70, 70, 70, 60, 0, 0, 0}, {0, 100, 127, 90}, 0, 0, FX(0, 10, 20, 50), PAT(3)},
+    {"R STRING", {PM_RSTRING, 40, 70, 80, 50, 1, 0, 0}, {0, 100, 127, 80}, 0, 0, FX(0, 10, 20, 40), PAT(3)},
+    {"R FM VOICE", {PM_RFM, 64, 70, 60, 40, 0, 0, 0}, {0, 100, 127, 70}, 0, 0, FX(0, 10, 20, 40), PAT(3)},
+    {"R QUANTISED", {PM_RQUANT, 64, 70, 70, 60, 1, 4, 0}, {0, 100, 127, 90}, 0, 0, FX(0, 10, 20, 50), PAT(3)},
+    {"R STR+REVERB", {PM_RSTRREV, 40, 70, 70, 50, 0, 0, 0}, {0, 100, 127, 90}, 0, 0, FX(0, 0, 10, 40), PAT(3)},
+    {"R DISASTROUS", {PM_RDISP, 0, 60, 60, 50, 0, 4, 0}, {0, 100, 127, 100}, 0, 0, FX(0, 0, 10, 40), PAT(3)},
 };
 
 static const engine_t ENG_PHYS = {

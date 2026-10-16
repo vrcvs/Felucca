@@ -18,16 +18,14 @@
  *    most MODAL struck (the cost measured on the device, ~13 % per voice).
  * 3. demos: each factory preset playing a phrase, each model over C1 .. C7, into DEMODIR. (The drums, PHYS's
  *    MODEL DRUM before 1.0, are the DRUM engine: tests/drum_test.c.) */
-#define main hostsim_main
-#include "hostsim.c"
-#undef main
+#include "rings_fixed.c"        /* (hostsim.c and Rings' models as plain calls) */
 #ifdef __APPLE__
 #include <libproc.h>
 #include <sys/resource.h>
 #endif
 
 static int fails;
-static const char *const MN[PM_COUNT] = {"MODAL", "STRING", "MEMB", "SYMP"};
+static const char *const MN[PM_COUNT] = {"MODAL", "STRING", "MEMB", "SYMP", "R.MODAL", "R.SYMP", "R.STRING", "R.FM", "R.QUANT", "R.STRREV", "R.DISP"};
 
 /* ------------------------------------------------------------ stability --- */
 typedef struct { int32_t peak; int64_t sum; uint32_t n, clamp; int32_t tail; } st_t;
@@ -96,7 +94,7 @@ static void stability(void)
     static const int32_t STRC[] = {0, 16384, 17039, 39321, 65535}, C2[] = {0, 65535};
     uint32_t md, ni, a, b, c, d, e, cases = 0, bad = 0;
     int32_t worst[PM_COUNT] = {0};
-    for (md = 0; md < PM_COUNT; md++)
+    for (md = 0; md < PM_RINGS; md++)
         for (ni = 0; ni < sizeof NOTES; ni++)
             for (a = 0; a < 5u; a++)
                 for (b = 0; b < 2u; b++)
@@ -131,10 +129,70 @@ static void stability(void)
                                 }
                             }
     printf("phys_test: stability: %u renders (%u models x notes 0..127 x STRC, BRIT, DAMP, POS, BOW corners), largest output",
-           cases, (uint32_t)PM_COUNT);
-    for (md = 0; md < PM_COUNT; md++)
+           cases, (uint32_t)PM_RINGS);
+    for (md = 0; md < PM_RINGS; md++)
         printf(" %s %.2f", MN[md], worst[md] / 1048576.0);
     printf(" (limit 16, strings 24, SYMP 32): %s\n", bad ? "FAIL" : "ok");
+    fails += bad != 0;
+}
+
+
+/* Rings' models (src/rings_dsp.c) as plain calls: 1 s from two strums, over notes, polyphony 1 / 2 / 4, the corners of
+ * STRUCTURE, BRIGHTNESS, DAMPING, POSITION, the chords and the string synth's effects: the output (after the limiter,
+ * 1.0 = Rings') stays under 1.5 and finite, has no DC to speak of (the FM voice and the string synth have some, as Rings' own), and is not silent (DAMPING 0 is a dead string) */
+static void rings_stability(void)
+{
+    static const double NOTE[] = {36, 60, 96}, STR[] = {0, 0.5, 1}, BR[] = {0, 1}, DA[] = {0, 0.5, 1}, PO[] = {0, 1};
+    static float o[FS];
+    uint32_t cases = 0, bad = 0, md, pl, a, b, c, d, e, ch, nx;
+    double worst[RG_NMODEL] = {0};
+    for (md = 0; md < RG_NMODEL; md++)
+        for (pl = 1; pl <= 4u; pl *= 2u)
+            for (a = 0; a < 3u; a++)
+                for (b = 0; b < 2u; b++)
+                    for (c = 0; c < 3u; c++)
+                        for (d = 0; d < 2u; d++)
+                            for (e = 0; e < 3u; e++)
+                                for (ch = 0; ch < (md == RG_DP ? 12u : md == RG_QUANT ? 3u : 1u); ch++) {
+                                    const int at[2] = {0, 14000};
+                                    double nt[2], pk = 0, sum = 0, rms = 0;
+                                    uint32_t i;
+                                    char why[160] = "";
+                                    if (md == RG_DP && a)       /* (STRUCTURE is not used: once) */
+                                        continue;
+                                    nt[0] = NOTE[e];
+                                    nt[1] = NOTE[e] + 7;
+                                    nx = md == RG_DP ? ch / 2u : 0;
+                                    rings_fixed_render((int)md, (int)pl, 2, at, nt, STR[a], BR[b], DA[c], PO[d],
+                                                       md == RG_DP ? (ch & 1u ? 10 : 0) : (int)ch * 5, (int)nx, 7u + e, o, FS);
+                                    for (i = 0; i < FS; i++) {
+                                        double v = o[i];
+                                        if (!(v == v) || v > 1e6 || v < -1e6) {
+                                            pk = 1e9;
+                                            break;
+                                        }
+                                        pk = fmax(pk, fabs(v));
+                                        sum += v;
+                                        rms += v * v;
+                                    }
+                                    rms = sqrt(rms / FS);
+                                    cases++;
+                                    if (pk > worst[md])
+                                        worst[md] = pk;
+                                    if (pk > 1.5)
+                                        snprintf(why + strlen(why), sizeof why - strlen(why), " peak %.2f;", pk);
+                                    if (md != RG_FM && md != RG_DP && pk < 1.5 && fabs(sum / FS) > 0.35 * pk + 0.002)
+                                        snprintf(why + strlen(why), sizeof why - strlen(why), " DC %.4f (peak %.3f);", sum / FS, pk);
+                                    if (pk < 1.5 && rms < 1e-4 && DA[c] > 0)
+                                        snprintf(why + strlen(why), sizeof why - strlen(why), " silent;");
+                                    if (why[0] && bad++ < 20u)
+                                        printf("phys_test: RINGS FAIL model %u poly %u note %.0f STRU %.1f BRIG %.0f DAMP %.1f POSN %.0f chord/fx %u:%s\n",
+                                               md, pl, nt[0], STR[a], BR[b], DA[c], PO[d], ch, why);
+                                }
+    printf("phys_test: Rings: %u renders (7 models x polyphony 1/2/4 x notes x corners), largest output", cases);
+    for (md = 0; md < RG_NMODEL; md++)
+        printf(" %.2f", worst[md]);
+    printf(" (limit 1.5): %s\n", bad ? "FAIL" : "ok");
     fails += bad != 0;
 }
 
@@ -309,7 +367,7 @@ static void demo_write(const char *dir, const char *name, uint32_t secs, void (*
 }
 
 /* a phrase per preset: (time in 1/8 s, note, length in 1/8 s, velocity); chords share a time */
-#define NPHRASE 9
+#define NPHRASE 16
 static const uint8_t PHRASE[NPHRASE][24][4] = {
     {{0, 84, 6, 110}, {6, 91, 6, 80}, {12, 96, 6, 100}, {20, 88, 8, 70}, {28, 79, 10, 110}, {29, 86, 10, 90},
      {30, 91, 10, 90}, {44, 84, 12, 120}},                                                  /* BELL TREE */
@@ -332,6 +390,13 @@ static const uint8_t PHRASE[NPHRASE][24][4] = {
     {{0, 48, 6, 100}, {1, 55, 6, 90}, {2, 60, 6, 90}, {3, 64, 6, 100}, {4, 67, 6, 90}, {5, 72, 6, 100},
      {12, 53, 6, 100}, {13, 57, 6, 90}, {14, 60, 6, 90}, {15, 65, 6, 100}, {16, 69, 6, 90}, {17, 72, 8, 110},
      {24, 76, 8, 110}},                                                                     /* HARP */
+    {{0, 57, 6, 110}, {8, 64, 6, 90}, {16, 69, 6, 100}, {24, 60, 8, 110}, {32, 72, 12, 100}},   /* R MODAL */
+    {{0, 57, 8, 110}, {10, 64, 8, 90}, {20, 69, 8, 100}, {32, 60, 12, 110}},   /* R SYMPATHETIC */
+    {{0, 52, 6, 110}, {6, 59, 6, 90}, {12, 64, 6, 100}, {18, 67, 6, 90}, {26, 71, 10, 110}},   /* R STRING */
+    {{0, 57, 6, 110}, {8, 60, 6, 90}, {16, 64, 6, 100}, {24, 69, 10, 110}},   /* R FM VOICE */
+    {{0, 57, 8, 110}, {12, 62, 8, 90}, {24, 64, 12, 100}},   /* R QUANTISED */
+    {{0, 55, 6, 110}, {8, 62, 6, 90}, {16, 67, 6, 100}, {26, 71, 12, 110}},   /* R STR+REVERB */
+    {{0, 57, 16, 110}, {20, 62, 16, 100}, {40, 64, 20, 110}},   /* R DISASTROUS */
 };
 static void play_preset(uint32_t f, uint32_t pi)
 {
@@ -370,7 +435,8 @@ static void play_model(uint32_t f, uint32_t md)
 
 static void demos(const char *dir)
 {
-    static const char *const MD[PM_COUNT] = {"model_modal", "model_string", "model_memb", "model_symp"};
+    static const char *const MD[PM_COUNT] = {"model_modal", "model_string", "model_memb", "model_symp", "model_r_modal", "model_r_symp",
+                                             "model_r_string", "model_r_fm", "model_r_quant", "model_r_strrev", "model_r_disp"};
     uint32_t i;
     char name[64];
     for (i = 0; i < ENG_PHYS.npresets && i < NPHRASE; i++) {
@@ -394,6 +460,7 @@ int main(int argc, char **argv)
     if (!getenv("NOCOST"))
         cost();                                         /* first: its children start from a clean state */
     stability();
+    rings_stability();
     torture();
     if (argc > 1)
         demos(argv[1]);

@@ -160,6 +160,8 @@
 # Browser emulator (web/emu, when emcc is there): the firmware in WebAssembly (build/emu) boots, plays keys and MIDI,
 #                   draws, lights its LEDs, keeps a save across instances, plays a song bit for bit as the same file
 #                   built with cc (web/emu/native_check.c); the cost of 1 s of a heavy song against real time.
+# RINGS (tests/rings_ref.cpp, rings_fixed.c): PHYS's R.* models against Rings' float code when its sources are there
+#                   (RINGS=path of pichenettes/eurorack); tests/rings_cpu.sh: instructions per sample under valgrind.
 # PHYS (tests/phys_test.c): stability over the whole parameter and pitch range, the worst-case cost against
 #                   the heaviest factory preset, demos in build/phys_demo/; tests/phys_ref.cpp compares the
 #                   fixed-point models with DaisySP's float originals when DaisySP is there (DAISYSP=path).
@@ -418,6 +420,20 @@ if [ -f build/gen/felucca_tables.h ]; then
         run "PHYS: the fixed-point models against DaisySP's float originals (mode frequencies, decays, Svf)" "$OUT/phys_ref"
     else
         echo "== skip PHYS reference test (no DaisySP: set DAISYSP to a checkout)"
+    fi
+    # RINGS' MODELS (tests/rings_ref.cpp): the six resonator models and Disastrous Peace of src/rings_dsp.c against
+    # Rings' own float code (pichenettes/eurorack, MIT: RINGS=path of a checkout), spectra / level / decay over a grid
+    E=${RINGS:-vendor/eurorack}
+    if [ -f "$E/rings/dsp/part.cc" ] && command -v c++ >/dev/null 2>&1; then
+        $CC -O2 -w -DRG_MODES_TOTAL=64 -Ibuild/gen -Ifirmware/src -Itests -c -o "$OUT/rings_fixed.o" tests/rings_fixed.c
+        c++ -O2 -std=c++14 -w -DTEST -Itests/rings_override -I"$E" -o "$OUT/rings_ref" tests/rings_ref.cpp \
+            "$E"/rings/dsp/*.cc "$E/rings/resources.cc" "$E/stmlib/dsp/atan.cc" "$E/stmlib/dsp/units.cc" \
+            "$E/stmlib/utils/random.cc" "$OUT/rings_fixed.o" -lm
+        for m in -1 0 1 2 3 4 5 6; do
+            run "RINGS: model $m against the float original" env MODEL=$m "$OUT/rings_ref"
+        done
+    else
+        echo "== skip RINGS reference test (no Rings sources: set RINGS to a pichenettes/eurorack checkout)"
     fi
     $CC -O2 -w -Ibuild/gen -Ifirmware/src -o "$OUT/drum_test" tests/drum_test.c -lm
     mkdir -p build/drum_demo

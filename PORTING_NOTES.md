@@ -166,3 +166,81 @@ Tutto in qualità piena non è realistico su un core solo. Rings Modal da solo p
 **Scale, sequencer e arpeggiatore** ci sono già in Felucca. Si riusano agganciando Rings come motore e Clouds come FX di bus.
 
 **Primo passo consigliato:** portare un solo resonator di Rings in virgola fissa, misurarlo sul dispositivo (`cpu_q8` e il meter di sistema) e ricalibrare queste stime prima di decidere numero di modi e di grani.
+
+---
+
+## 4. Stato dell'implementazione: Rings integrale in PHYS
+
+Aggiornato dopo la fase di codice. Tutto sotto è **[misura]** sull'host (Linux x86-64, gcc), salvo dove scritto altrimenti. **Niente è stato provato sul dispositivo.**
+
+### Fatto
+
+- `firmware/src/rings_dsp.c` (MIT, porto in virgola fissa del codice di Emilie Gillet) + `tools/gen_rings_tables.py` (tabelle: rigidità, decadi, compensazione di ritardo, quantizzatore FM). In `eng_phys.c` il MODEL passa da 4 a **11 valori**: `MODAL STRNG MEMB SYMP` (invariati, stessi hash golden) più `R.MOD R.SYM R.STR R.FM R.QNT R.S+R R.DSP`.
+- **Sei modelli**: modale, corde simpatiche, corda, voce FM, corde simpatiche quantizzate, corda + riverbero. **Più l'easter egg Disastrous Peace** (`R.DSP`): 12 voci × 3 armoniche polyBLEP, registrazione, inviluppo AD, i sei effetti (formanti, chorus, riverbero, formanti 2, ensemble, riverbero 2) e il limitatore.
+- **Polifonia 1/2/4** (E5 POLY), **eccitatore interno** (il Plucker di Rings: rumore filtrato, posizione, cutoff da BRIGHTNESS) e **strum** (ogni nota-on colpisce la voce successiva, come `Part::Process`; le precedenti continuano a suonare).
+- **Parametri** (EDIT 1/2): E1 STRU(cture), E2 BRIG(htness), E3 DAMP(ing), E4 POSN, E5 POLY, E6 TONC (R.SYM: nota di riferimento, 0 = una quarta sotto la prima nota) / CHRD (R.QNT e R.DSP, 0..10), E7 TUNE (±12 semitoni) / FX (R.DSP). **Frequency** = la nota (tastiera, MIDI, sequencer, arp, bend e glide: l'ultima voce colpita segue il bend). Scale, sequencer e arpeggiatore di Felucca funzionano come sempre.
+- 7 preset (`R MODAL` … `R DISASTROUS`, con ADSR a sustain pieno), voci nei golden (`tests/golden.txt`: +7 righe, le 98 esistenti non cambiano), demo in `build/phys_demo`.
+- Conclusioni del §3 rispettate: virgola fissa, un core solo (nessun thread, nessuno stato condiviso tra core: l'arena è di una parte sola), **niente ingresso audio**, modi ridotti, linee più corte, un riverbero scalato, validazione contro il float.
+
+### Come è fatto (differenze dall'originale)
+
+| Cosa | Rings | Qui |
+| --- | --- | --- |
+| Modi totali (tutte le voci) | 64 | 40 (`RG_MODES_TOTAL`; i test contro il float usano 64) |
+| Linea della corda / dispersione | 2048 / 1024 | 1024 / 512 (le note molto basse hanno una linea più corta: intonazione limitata in basso) |
+| Riverbero | 16 384 campioni a 32 kHz | 8192 campioni, tempi scalati; il guadagno del loop segue `time^0.55` |
+| Uscita | stereo (out/aux) | **mono**: modale out+aux, corde out−aux per voce, DP (L+R)/2; il pan di PHYS fa il resto |
+| Blocco | 24 campioni | 32 (`CTL`) |
+| Note filter di DP | sì | no (la nota entra a ogni blocco senza filtro) |
+| Stato | per voce | **un'arena unica** (31 872 B, `.pool`) di una parte alla volta, non in `eng_mem`; chi suona per ultimo un modello R.* la prende, le altre parti R.* tacciono |
+| Voci host | — | la voce host che ha iniziato l'ultima nota è la "portante" di tutto il suono (il suo ADSR e la velocity lo modulano); le altre voci della parte non renderizzano |
+
+I tre punti che contano per la precisione (da non rompere): le linee a 16 bit (corde in Q12, riverbero in Q14) **arrotondano** e quantizzano con **error feedback**, altrimenti ogni passaggio del loop di ritardo introduce un bias e una perdita (DC e decadimenti sbagliati); l'interpolazione di Hermite lavora in Q20; il filtro FIR/IIR di smorzamento arrotonda.
+
+### Validazione contro il float (`tests/rings_ref.cpp`, `tests/rings_fixed.c`)
+
+Il float è il codice di Rings (`rings/dsp/part.cc`, `string_synth_part.cc`) con `kSampleRate = 44100` e le tabelle di accordi di Bryan Noll (come nel build originale: `tests/rings_override`). Per ogni modello: griglia di note, parametri, polifonia 1/2/4, accordi e strum; si confrontano **picchi spettrali** (entro 5 ct + la risoluzione FFT), **livello** (±8 dB, media in dB su 24 semi per i modelli a rumore), **decadimento** (±5 dB). Il modale e la FM sono deterministici e sono confrontati anche campione per campione.
+
+| Modello | Casi | Falliti |
+| --- | --- | --- |
+| 0 modale / 1 simpatiche / 2 corda / 3 FM / 4 quantizzate / 5 corda+riverbero | 72–144 ciascuno | **0** |
+| 6 Disastrous Peace (poly 1/2/4 × 6 fx × 3 config × 3 accordi) | 162 | **12** (vedi problemi aperti) |
+
+Altri test nuovi (`tests/phys_test.c`, in `run_tests.sh`): stabilità di tutti e 7 i modelli per poly 1/2/4, note 36/60/96 e gli angoli dei parametri (3888 render: picco ≤ 1,5, niente NaN, DC e silenzio), torture a 11 modelli, e `tests/rings_cpu.sh`. Le suite esistenti che ho potuto eseguire (regress/golden, union, dualcore, project, phys) restano invariate. `run_tests.sh` intero **non** gira qui: si ferma a "run ./build.sh first" perché il firmware non si compila (vedi sotto).
+
+### Build
+
+- Le tabelle (`build/gen/rings_tables.h`) si generano con `tools/build.py` (voce aggiunta); I test (che includono tutto il firmware via `hostsim.c`) si compilano su host con gcc senza errori né warning nuovi rilevanti.
+- **Cross-build per pi32v2 NON eseguito**: la toolchain JieLi e l'SDK rispondono 403 dal proxy (non aggirato). Quindi la compilazione per il chip, l'ingombro reale in `.pool`/`.bss`, i controlli di `build.py` (margine 8 KiB nel POOL) e il `target_budget.py` sul disassemblato non sono verificati.
+
+### CPU misurata
+
+**Nell'emulatore: non misurata** (`emcc` non c'è in questo ambiente; non ho provato altri modi per raggiungerlo). Misura disponibile: istruzioni host per campione sotto valgrind/callgrind (`tests/rings_cpu.sh`), una parte, 8 tasti tenuti (3 voci PHYS / strum a rotazione sui Rings), differenza tra render e solo setup. Questa macchina conta istruzioni x86-64 e i numeri non sono quelli del Mac in `cpu_baseline.txt` (circa ×1,4 più alti): vanno letti **contro i preset PHYS di questa stessa esecuzione**.
+
+| Preset | Poly | Istruzioni / campione |
+| --- | --- | --- |
+| PLUCK (riferimento, il più leggero) | — | 1145 |
+| BOWED METAL (riferimento, il più pesante) | — | 2047 |
+| R MODAL | 1 / 4 | 1637 / 2351 |
+| R SYMPATHETIC | 1 / 4 | 2364 / 2508 |
+| R STRING | 2 / 4 | 1339 / 2078 |
+| R FM VOICE | 1 / 4 | 816 / 1461 |
+| R QUANTISED | 2 / 4 | 2407 / 2500 |
+| R STR+REVERB | 1 / 4 | 1491 / 2600 |
+| R DISASTROUS | 1 / 4 | 2324 / 1324 (a poly 4 solo un gruppo suona e gli altri oscillatori a guadagno zero sono saltati) |
+
+**[stima, da verificare sul dispositivo]** Il dato misurato sul dispositivo per BOWED METAL (3 voci × ~13 %) è ~39 % di un core; scalando con questi rapporti il peggior caso Rings (R STR+REVERB a 4 voci, ~2600) sta attorno al **50 % di un core**, e i preset di default tra il 25 % e il 45 %. È sotto il budget di un core, ma senza secondo core non resta spazio per Clouds in cascata nel caso peggiore: serve ridurre i modi o la polifonia come previsto in §3.
+
+### Problemi aperti
+
+1. **Cross-build e RAM non verificati** (toolchain 403). L'arena è 31 872 B nel POOL; con i ~42 KB liberi stimati restano ~10 KB contro i 8 KiB richiesti da `build.py`: margine di ~2 KB, da confermare con `build.py`. Se non basta: scalare ancora il riverbero (8 KB in meno) o limitare R.S+R a poly ≤ 2.
+2. **CPU sul dispositivo e nell'emulatore non misurata** (numeri sopra: host, relativi).
+3. **Disastrous Peace con riverbero (fx REVB, REV2) e POSN alto (≥ 0,9)**: livello +2…+6 dB sopra il float nella coda (12 casi su 162; gli altri 150 e tutte le altre fx passano). Il riverbero fisso decade ~1 dB in meno del float per finestra a tempi alti; il suono non cambia carattere. Da rifinire (o allargare la tolleranza).
+4. **Un'arena sola**: due parti con modelli R.* contemporanei non si possono avere; la seconda che suona toglie la voce alla prima (silenzio, non crash). Il motore conserva comunque i suoi 3 voci/parte per MODAL/STRNG/MEMB/SYMP.
+5. **Coda dopo il note-off**: i risuonatori e il riverbero tacciono quando finisce il release dell'ADSR della voce portante (`phys_post` per far continuare la coda come in §3 non è stato aggiunto, per non toccare `voice.c`/`fx.c`). Con release lungo (i preset hanno R 40–100) il suono si spegne come in Rings, ma non oltre.
+6. **Modi/linee/riverbero ridotti, uscita mono, blocco da 32, niente NoteFilter in DP** (tabella sopra): l'intonazione e il livello sono entro le tolleranze, il timbro delle note molto basse delle corde e le code del riverbero differiscono dall'originale.
+7. **Test float-vs-fixed**: i modelli a rumore (1, 2, 4, 5) sono confrontati su medie di 24 semi e sulla risoluzione FFT, non campione per campione; il DC della corda+riverbero a BRIG 0 è un po' più negativo del float (~−0,005 contro ~0 di media, −40 dB). Il limite di DC in `phys_test` è largo per questo (35 % del picco).
+8. **Il TUNE/FREQ fine e il TONC** sono parametri di PHYS, non il CV/V-oct di Rings; l'interfaccia non ha ancora nomi dedicati nelle pagine HOME (knob 1–4 = STRU, BRIG, DAMP, POSN).
+9. **Gain** dell'uscita (24000 su tutti i modelli R.*) tarato a orecchio sui livelli delle demo (picchi 4 000–16 000 su 32 768), non misurato su altoparlante.
+10. **Clouds, ingresso audio, Parasites**: non toccati in questa fase.
+11. **`tests/cpu_baseline.txt` senza i 7 preset nuovi**: il contatore di `regress.c` (kernel macOS) qui non esiste; sul Mac `BUDGET_UPDATE=1` li aggiunge. Anche `tests/target_budget.txt` (disassemblato pi32v2) va rigenerato col cross-build.
