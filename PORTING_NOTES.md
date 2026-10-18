@@ -340,3 +340,61 @@ Le stime di §2 (60–95 % granulare, 80–120 % spectral) erano pessimistiche: 
 7. **Un solo Clouds** per tutto lo strumento (come un modulo dopo il mixer): SRC sceglie chi ci passa, non si possono avere due Clouds diversi.
 8. **Il bug di `window.h` a monte** (sopra) andrebbe segnalato a pichenettes/eurorack.
 9. `tests/cpu_baseline.txt` / `target_budget.txt` non aggiornati (stessi motivi di §4).
+
+## 6. Mod matrix per Rings e Clouds, tasti, sequencer, pagine FM-1 e mappa CC
+
+Richiesta: sorgenti 2 LFO, 1 inviluppo, velocity, step del sequencer, CC MIDI; destinazioni tutti i parametri di Rings e Clouds; freeze e trig di Clouds su tasti e sequencer; pagine parametri sull'FM-1 (4 manopole per pagina); mappa CC MIDI.
+
+### Fatto
+
+- **Sorgenti** (`mod.c`, `MS_*`, in coda a quelle esistenti): `LFOB` (2° LFO per traccia), `STEP` (valore dello step), `CC` (un controller MIDI scelto). Le sorgenti già presenti coprono il resto: `LFO` (LFO A), `ENV`, `VEL`, `KEY`, `RAND`, `MODW`, `AT`, `EXPR`, `S&H`, `SLEW`.
+- **Destinazioni** (`MD_*`, in coda): `CPOS CSIZE CPTCH CDENS CTEX CWET CSPRD CFDBK CREV` (le nove manopole continue di Clouds, che si sommano al valore della pagina) e due cancelli, `CFRZ` (freeze) e `CTRG` (trig). **Rings**: nel firmware Rings è il motore PHYS e i suoi parametri sono `E1..E8`, già destinazioni della matrice per qualsiasi motore (con le etichette del motore: MODEL, STRUCT, BRIT, DAMP, POS …). Non serve altro: tutti gli otto, per le quattro tracce.
+- **Le 4 voci della matrice** restano 4 slot per traccia (SRC/DST/AMT): una traccia può quindi modulare fino a 4 destinazioni; sulle 4 tracce sono 16. Con un `AMT` di 64 a sorgente piena si percorre l'intera escursione della manopola (come per `E1..E8`); il risultato è limitato al suo intervallo. Più tracce che puntano alla stessa manopola si sommano.
+- **Cancelli**: una sorgente × `AMT` sopra metà scala tiene `CFRZ` alto; per `CTRG` conta il fronte di salita. `ENV`/`VEL`/`KEY`/`RAND` valgono quelli dell'ultima nota della traccia, come per le altre destinazioni per-blocco.
+- **Freeze e trig di Clouds** (`fx_clouds.c`, `cld_params`): FREEZE = la manopola FRZ **oppure** il tasto, il CC 107, il parametro `CSEQ` di una traccia (`FRZ`/`BOTH`) o il cancello `CFRZ`. TRIG (un impulso di un blocco) = una nota che passa in Clouds con `TRIG NOTE` (come prima) **oppure** il tasto, il CC 108, uno step con `CSEQ` `TRIG`/`BOTH` o il cancello `CTRG`.
+  - **Tasti**: nel layer FX (FX tenuto) i tasti bianchi F5 e G5 erano vuoti e ora sono `CLOUDS FREEZE` (tenuto = freeze; con FX LATCH commuta) e `CLOUDS TRIG` (impulso). Sono due nuovi effetti (`PF_CFRZ`, `PF_CTRG`, in coda alla lista memorizzata) quindi si riassegnano come gli altri (PRESETS con il tasto tenuto). Non hanno stadio audio: `perf_begin` li toglie da `held` e il percorso idle resta com'era. Il layer GLO è pieno (C4 unmute, D4 learn, E4 fill, F4 tap), perciò non è stato toccato.
+  - **Sequencer**: `CSEQ` (OFF, TRIG, FRZ, BOTH) è un parametro di traccia **bloccabile per step** (parameter lock, `motion_param`): uno step con il lock TRIG fa partire Clouds anche se non ha note, uno con FRZ lo congela finché lo step dopo non toglie il lock. L'aggancio è in `seq_play` dopo `motion_step`, solo se lo step passa la probabilità (`SEQ_ROLLED`).
+- **STEP come sorgente**: `STEP` (−64..63) è un parametro di traccia bloccabile per step: la sorgente `STEP` vale quello dello step in corso (e il valore base negli altri). Basta un lock `STEP` per avere una sequenza di modulazione per step su qualsiasi destinazione, Rings e Clouds compresi.
+- **LFO B** (`mod.c`, statica per traccia): RATE, WAVE (SIN TRI SAW SQR S&H), SYNC (come LFO 2), POL (BI/UNI). Libero (una nota non lo riavvia). Gira una volta per blocco in `mod_pre`, **sul core 0, prima delle parti** (`fx.c mix_block`), con un xorshift privato per S&H: non tocca il `rng` condiviso e il risultato è identico su 1 e 2 core e per i golden.
+- **CC come sorgente**: `CC#` sceglie il controller; vale l'ultimo ricevuto sul canale della traccia (0..1); CC121 lo azzera.
+- **Pagine** (famiglia LFO, 4 manopole): `LFO B` = RATE WAVE SYNC POL; `MOD SRC` = STEP, CC#, CSEQ (la quarta manopola è vuota). Con le esistenti `MOD` (slot, sorgente, destinazione, quantità) e `CLOUDS`, `CLOUDS 2`, `BLEND`, `CLOUDS 3`, i parametri dei due motori sono raggiungibili a 4 manopole per pagina. Hint HELP aggiunti.
+- **Mappa CC MIDI** (`midi_control.c`, sempre attiva come la standard; un CC "imparato" con MIDI LEARN ha la precedenza):
+
+  | CC | Funzione |
+  | --- | --- |
+  | 20–27 | CLOUDS POSN, SIZE, PTCH, DENS, TEXT, WET, SPRD, FDBK |
+  | 102 | CLOUDS REV |
+  | 103 | CLOUDS MODE (0..127 distribuito su OFF, GRAN, STRT, LOOP, SPEC) |
+  | 104 / 105 / 106 | CLOUDS QUAL / SRC / TRIG (modo) |
+  | 107 | FREEZE (≥64 acceso; CC121 lo spegne) |
+  | 108 | TRIG (impulso al passaggio a ≥64) |
+  | 109–116 | RINGS: `E1..E8` della traccia del canale (nel PHYS: MODEL, STRUCT, BRIT, DAMP, POS, … come le etichette del motore) |
+  | 117 / 118 / 119 | LFO B RATE / WAVE / SYNC |
+
+  I CC di Clouds sono globali (un solo Clouds), gli altri riguardano la traccia che il canale suona (stessa regola delle note, `ROUT`). I CC 20–31 e 102–119 sono non definiti nello standard MIDI. Resta ogni CC come **sorgente** (`CC` + `CC#`), quindi qualunque controller può anche modulare un parametro a piacere tramite la matrice.
+
+### Come è fatto (e perché)
+
+- **Il formato del progetto è pieno.** `FUN10` è un unico settore flash di 3840 byte con un byte libero; `P_COUNT` è 111 (limite 127 e `P_E0` ≤ 119 per la codifica del MIDI LEARN e il bit di lock del motion). Parametri di traccia nuovi non entrano senza cambiare il formato di salvataggio. Si sono riusati **id inerti**: quelli degli inviluppi operatore di DIGITAL (`P_FM*`, vivi solo con `FELUCCA_FM4=1`, già fuori da pagine ed editor) e `P_ED_FX` (non letto da nessuno). Solo gli id il cui valore salvato era sempre 0 (ATK/DEC/REL di OP1 e OP2; SUS e LEVEL erano salvati a 127): `P_LBRATE`/`P_LBWAVE`/`P_LBSYNC`/`P_LBPOL`/`P_MCCN`/`P_CSEQ`, più `P_STEPV` su `P_ED_FX`. Un progetto salvato prima li carica a 0: tutto spento, e le sorgenti/destinazioni nuove non sono selezionate, quindi **il suono è identico** (i 105 render di riferimento non cambiano).
+- **Valori della matrice append-only** (sono salvati): le sorgenti e destinazioni nuove sono in coda, le vecchie non si spostano.
+- **Con `FELUCCA_FM4=1`** (DIGITAL) gli id tornano a DIGITAL: `RC_ON` vale 0, le pagine nuove spariscono, le sorgenti `LFOB/STEP/CC` valgono 0 e `mod_pre` non fa nulla. `P_IS_FM`/`P_IS_RC` (`core.h`) distinguono gli id nei punti che trattano gli id di DIGITAL come "del motore" (`motion.c`, `project.c`): i lock su `CSEQ`/`LFO B` non vengono scartati al cambio di motore.
+- **Nessun costo se non usata.** `mod_pre` gira ogni blocco: fa avanzare 4 LFO B (una somma e un'onda per traccia, una divisione solo con SYNC) e scorre 16 slot. Le destinazioni verso Clouds non toccano `t->p` (a differenza delle altre per-blocco, che modificano e ripristinano `t->p`): scrivono offset in `mod_cld[]`, che `cld_params` somma a `song.cp` con clamp. `ENV` verso Clouds attiva `mod_voice` (che aggiorna `m_env`) anche se la traccia non ha altre destinazioni.
+- **Due core**: tutto il nuovo lavoro (LFO B, offset, cancelli, impulsi) è sul core 0 prima delle parti e dentro `clouds_pre`, quindi niente di nuovo da sincronizzare con il core 1; i flag degli impulsi sono byte scritti dal loop principale/MIDI e azzerati dall'ISR.
+
+### Validazione
+
+`tests/modrc_test.c` (in `run_tests.sh`): default a 0 degli id riusati e pagine presenti; `STEP`→`CWET` = la manopola impostata a mano **bit per bit**; `LFOB`, `ENV`→`CPOS` e `CC`→`CWET` cambiano il suono; il freeze da manopola, `CSEQ`, tasto, CC107 e cancello `CFRZ` danno lo stesso identico render; il trig da tasto, CC108, `cl_seq_trg` e cancello `CTRG` danno lo stesso render, diverso da nessun trig; `seq_play` su uno step con lock `CSEQ`=TRIG alza `cl_seq_trg` e lo step dopo no; la mappa CC (20–27, 103, 107, 109, 117, CC121); ogni scena **bit per bit uguale su 1 e 2 core**. Adattati i test che avevano cablato la vecchia disposizione: `motion_test` (gli id esclusi dalla lista AUTOMATION) e `ui_test` (F5/G5 del layer FX non più vuoti; l'ordine degli effetti con PRESETS).
+
+### CPU
+
+Non misurata sul dispositivo (nessuna toolchain pi32v2 qui). Sull'host i 105 render golden sono invariati e il controllo CPU della regressione resta nel budget (`mod_pre` è nel percorso di ogni blocco); la matrice non usata costa 4 LFO B + 16 controlli per blocco di 32 campioni.
+
+### Problemi aperti
+
+1. **CPU sul dispositivo non misurata** (come §4 e §5); `target_budget.txt` non rigenerato.
+2. **DIGITAL (`FELUCCA_FM4=1`) esclude queste funzioni**: condividono gli id. Si risolve solo con un formato di progetto nuovo (FUN11) che dia posto a nuovi parametri di traccia.
+3. **Editor web ed emulatore non aggiornati**: l'editor non mostra le pagine `LFO B`/`MOD SRC`, i nuovi nomi di sorgente/destinazione e i due tasti del layer FX (il mock è solo del §4/§5); l'emulatore non è stato ricompilato (`emcc` assente). I nuovi parametri sono comunque già raggiungibili dal protocollo, per id.
+4. **`CSEQ` FRZ** dura quanto il lock: un FRZ tenuto da una traccia che non riceve mai lo step successivo (sequencer fermo) resta congelato finché non si toglie il parametro; il CC121 spegne solo il CC107.
+5. **Le destinazioni verso Clouds sono globali**: più tracce sommano i loro offset sulle stesse manopole (un solo Clouds, §5.7). Le sorgenti per-voce (`ENV`, `VEL`, `KEY`, `RAND`) usano l'ultima nota.
+6. **`CC` come sorgente** legge un solo controller per traccia (`CC#`); CC20–27/102–119 sono comunque consumati dalla mappa e non si perdono: restano leggibili anche come sorgente.
+7. Il layout dei tasti bianchi F5/G5 del layer FX cambia per chi aveva salvato quei tasti vuoti con "default" (codice 0): ora prendono `CLOUDS FREEZE`/`TRIG`; chi li aveva svuotati esplicitamente (NONE) li mantiene vuoti.

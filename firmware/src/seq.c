@@ -1074,6 +1074,8 @@ static __attribute__((noinline)) void seq_play(track_t *t, uint32_t idx, uint32_
         skip = SEQ_MISS;
     if (m)
         motion_step(t, idx, m, skip == SEQ_ROLLED);
+    if (RC_ON && skip == SEQ_ROLLED && (t->p[P_CSEQ] & 1))   /* RingsClouds: the step (a lock, or the track's CSEQ) TRIGs Clouds */
+        cl_seq_trg = 1;
     if (t->rskip_n && t->rskip_idx == idx) {
         for (k = 0; k < t->rskip_n; k++) {
             for (i = 0; i < s->n; i++)

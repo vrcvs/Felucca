@@ -1087,6 +1087,7 @@ static void mix_block(int32_t *out, uint32_t n)
         send_c[i] = send_d[i] = send_r[i] = mix_l[i] = mix_r[i] = 0;
     events_block(n);
     perf = perf_begin(n);                               /* the FX hold layer at work (perform.c) */
+    mod_pre();                                          /* RingsClouds: LFO B, the matrix onto CLOUDS (mod.c) */
     int cl = clouds_pre(n);                             /* CLOUDS (fx_clouds.c): the bus this block */
 #if FELUCCA_CPU2
     if (cld.h) {                                        /* the parts that go through add into its cap */

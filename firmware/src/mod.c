@@ -50,14 +50,18 @@
  * presets read and write t->p from the main loop, which the ISR preempts; TIMER5 only fills the MIDI rings),
  * and the engines read t->p as before. An engine reads its parameters in note_on (events_block) unmodulated.
  * Nothing active (every slot with SRC, DST or AMT at 0): no work, and the sound is bit-identical. */
-enum { MS_OFF, MS_LFO, MS_ENV, MS_VEL, MS_KEY, MS_RAND, MS_MODW, MS_AT, MS_EXPR, MS_SH, MS_SLEW, MS_N };
+enum { MS_OFF, MS_LFO, MS_ENV, MS_VEL, MS_KEY, MS_RAND, MS_MODW, MS_AT, MS_EXPR, MS_SH, MS_SLEW,
+       MS_LFOB, MS_STEP, MS_CC, MS_N };   /* RingsClouds: LFO B, the step's STEP value, a MIDI CC */
 enum { MD_OFF, MD_PITCH, MD_CUT, MD_SHP, MD_AMP, MD_PAN, MD_DIST, MD_CHO, MD_DLY, MD_REV, MD_RATE, MD_VIB, MD_E1,
-       MD_DEPTH = MD_E1 + 8, MD_VEL, MD_TIME, MD_N };   /* (append-only: the stored values keep their meaning) */
+       MD_DEPTH = MD_E1 + 8, MD_VEL, MD_TIME,
+       MD_CPOS, MD_CSIZE, MD_CPTCH, MD_CDENS, MD_CTEX, MD_CWET, MD_CSPRD, MD_CFDBK, MD_CREV,   /* RingsClouds: CLOUDS' knobs */
+       MD_CFRZ, MD_CTRG, MD_N };   /* .. and its gates (append-only: the stored values keep their meaning) */
+#define MD_CLOUDS(d) ((d) >= MD_CPOS && (d) <= MD_CREV)
 _Static_assert(NELEM(N_MSRC) == MS_N && NELEM(N_MDST) == MD_N, "N_MSRC / N_MDST == MS_* / MD_*");
 _Static_assert(P_M2SRC == P_M1SRC + 3 && P_M4AMT == P_M1SRC + 11 && P_M4AMT + 1 == P_FM1_ATK, "matrix slots: 3 ids each");
 #define NMSLOT 4u
 #define MS_VOICE(s) ((s) >= MS_ENV && (s) <= MS_RAND)             /* a value per voice */
-#define MS_BIPOLAR(s) ((s) == MS_LFO || (s) == MS_KEY || (s) == MS_RAND || (s) >= MS_SH)
+#define MS_BIPOLAR(s) ((s) == MS_LFO || (s) == MS_KEY || (s) == MS_RAND || ((s) >= MS_SH && (s) != MS_CC))
 #define MD_ENGINE(d) ((d) >= MD_E1 && (d) < MD_E1 + 8)           /* E1..E8: P_E0..P_E7 */
 
 /* the track parameter of a per-block destination */
@@ -97,6 +101,66 @@ static int16_t mod_rand(void)    /* RAND of a note-on: xorshift32, bipolar */
     return (int16_t)(mod_seed >> 16);
 }
 
+/* ---- RingsClouds: LFO B, the MIDI CC values, the Clouds destinations (PORTING_NOTES.md section 6) ----
+ * LFO B is a second LFO per track in statics (track_t is full): free-running (a note does not restart it), WAVE as LFO's
+ * (S&H from its own xorshift, so the shared generator and the golden renders are untouched), SYNC as LFO 2's, POL; it
+ * ticks once per block in mod_pre on the first core, whatever the parts' cores do, so the result is the same on one core or
+ * two. CC: the value of controller P_MCCN last received on the track's channel (mod_midi), 0..1 */
+static uint32_t lb_ph[NTRK], lb_rnd[NTRK];
+static int16_t lb_val[NTRK];
+static uint8_t mod_cc[NTRK][128];
+static int32_t mod_cld[CP_COUNT];            /* the offsets onto CLOUDS' knobs, this block (fx_clouds.c cld_params) */
+static uint8_t mod_cfrz, mod_ctrg;           /* the matrix holds FREEZE; TRIG: a rising edge this block */
+static uint32_t div_samples(uint32_t div);   /* (fx.c) */
+
+static int32_t lb_wave(uint32_t k, uint32_t ph, uint32_t w)
+{
+    switch (w) {
+    case 1:
+        return osc_tri(ph);
+    case 2:
+        return (int32_t)(ph >> 16) - 32768;
+    case 3:
+        return ph < 0x80000000u ? 32767 : -32767;
+    case 4:
+        return (int32_t)(lb_rnd[k] >> 16) - 32768;
+    default:
+        return osc_sine(ph);
+    }
+}
+
+static __attribute__((noinline)) uint32_t lb_sync_inc(const track_t *t)
+{
+    uint32_t cyc = div_samples(LSYNC_DIV[(uint32_t)t->p[P_LBSYNC] % NELEM(LSYNC_DIV)]), q, r;
+    cyc = cyc ? cyc : 1u;
+    q = 0xFFFFFFFFu / cyc;
+    r = 0xFFFFFFFFu % cyc;
+    return q * CTL + (r * CTL + CTL) / cyc;
+}
+
+/* LFO B of track k, one block on */
+static void lb_tick(const track_t *t, uint32_t k)
+{
+    uint32_t old = lb_ph[k];
+    int32_t v;
+    lb_ph[k] += t->p[P_LBSYNC] ? lb_sync_inc(t) : LFO_INC[t->p[P_LBRATE] & 127];
+    if (lb_ph[k] < old) {
+        uint32_t s = lb_rnd[k] ? lb_rnd[k] : 0x9E3779B9u ^ (k * 0x01000193u);
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        lb_rnd[k] = s;
+    }
+    v = lb_wave(k, lb_ph[k], (uint32_t)t->p[P_LBWAVE]);
+    lb_val[k] = (int16_t)(t->p[P_LBPOL] ? (v + 32768) >> 1 : v);
+}
+
+/* the source of a gain-type destination: a unipolar LFO (UNI) reads as ENV does */
+static inline uint32_t mod_gs(const track_t *t, uint32_t s)
+{
+    return (s == MS_LFO && t->p[P_LPOL]) || (RC_ON && s == MS_LFOB && t->p[P_LBPOL]) ? MS_ENV : s;
+}
+
 static int32_t mod_key(uint32_t note) { return clamp(((int32_t)note - 60) * 512, -32767, 32767); }
 
 /* S&H: the value of the LFO's cycle (voice.c lfo_rand; 0 before its first one ends), bipolar */
@@ -112,6 +176,12 @@ static int32_t mod_tsrc(const track_t *t, uint32_t s, int32_t lfo)
         return t->lfo_prev + (((mod_sh(t) - t->lfo_prev) * (int32_t)(t->lfo_ph >> 17)) >> 15);
     case MS_LFO:
         return lfo;
+    case MS_LFOB:
+        return RC_ON ? lb_val[t - trk] : 0;
+    case MS_STEP:
+        return RC_ON ? clamp(t->p[P_STEPV] * 512, -32767, 32767) : 0;
+    case MS_CC:
+        return RC_ON ? mod_cc[t - trk][t->p[P_MCCN] & 127] * 258 : 0;
     case MS_ENV:
         return t->m_env;
     case MS_VEL:
@@ -161,7 +231,7 @@ static __attribute__((noinline)) int32_t mod_depth(const track_t *t, int32_t lfo
     for (k = 0; k < NMSLOT; k++) {
         uint32_t s = (uint32_t)p[P_M1SRC + 3u * k];
         if (p[P_M1DST + 3u * k] == MD_DEPTH && p[P_M1AMT + 3u * k] && s && s < MS_N)
-            g = mulq15(g, mod_gain(s == MS_LFO && p[P_LPOL] ? MS_ENV : s, mod_tsrc(t, s, lfo), p[P_M1AMT + 3u * k]));
+            g = mulq15(g, mod_gain(mod_gs(t, s), mod_tsrc(t, s, lfo), p[P_M1AMT + 3u * k]));
     }
     return g;
 }
@@ -176,8 +246,9 @@ static __attribute__((noinline)) int mod_begin(track_t *t)
     modw_t *mw = &MOD(t);
     mw->on = 0;
     for (k = 0; k < NMSLOT; k++)                        /* (VEL and TIME: at the notes, not here) */
-        if (p[P_M1SRC + 3u * k] && p[P_M1DST + 3u * k] && p[P_M1AMT + 3u * k] && p[P_M1DST + 3u * k] < MD_VEL)
-            break;
+        if (p[P_M1SRC + 3u * k] && p[P_M1DST + 3u * k] && p[P_M1AMT + 3u * k] &&
+            (p[P_M1DST + 3u * k] < MD_VEL || (p[P_M1SRC + 3u * k] == MS_ENV && p[P_M1DST + 3u * k] >= MD_CPOS)))
+            break;                                      /* (RingsClouds: ENV onto CLOUDS needs mod_voice's m_env) */
     if (k == NMSLOT)
         return 0;
     lfo = mulq15(t->lfo_val, t->lfo_fade);              /* (the LFO of the block before: track_render ticks it) */
@@ -201,7 +272,7 @@ static __attribute__((noinline)) int mod_begin(track_t *t)
                 mw->vdst[mw->nv] = (uint8_t)d;
                 mw->vamt[mw->nv++] = (int8_t)a;
             } else {                                    /* (a UNI LFO, 0..1, takes AMP as ENV does) */
-                mod_voice_add(s == MS_LFO && p[P_LPOL] ? MS_ENV : s, d, mod_tsrc(t, s, lfo), a, &mw->pit, &mw->cut,
+                mod_voice_add(mod_gs(t, s), d, mod_tsrc(t, s, lfo), a, &mw->pit, &mw->cut,
                               &mw->shp, &mw->gain);
             }
             continue;
@@ -301,7 +372,7 @@ static __attribute__((noinline)) int32_t mod_at_note(const track_t *t, uint32_t 
         if (d == MD_VEL) {
             sum += (((x * a) >> 6) * 127) >> 15;
         } else {
-            int32_t u = MS_BIPOLAR(s) && !(s == MS_LFO && p[P_LPOL]) ? (x + 32768) >> 1 : x;
+            int32_t u = MS_BIPOLAR(mod_gs(t, s)) ? (x + 32768) >> 1 : x;
             u = clamp(u, 0, 32767);
             sum += a > 0 ? (u * a) >> 6 : ((32767 - u) * -a) >> 6;
         }
@@ -342,12 +413,15 @@ static __attribute__((noinline)) void mod_midi(track_t *t, uint32_t st, uint32_t
     if (st == 0xD0u) {
         t->at = (uint8_t)d1;
     } else if (st == 0xB0u) {
+        mod_cc[t - trk][d1 & 127u] = (uint8_t)d2;         /* RingsClouds: the CC source (CC# of MOD SRC) */
         if (d1 == 1u)
             t->mw = (uint8_t)d2;
         else if (d1 == 11u)
             t->ex_off = (uint8_t)(127u - d2);
         else if (d1 == 121u)
             t->mw = t->at = t->ex_off = 0;
+        if (d1 == 121u)
+            memset(mod_cc[t - trk], 0, sizeof mod_cc[0]);
     }
 }
 
@@ -362,4 +436,46 @@ static const char *mod_dst_name(const track_t *t, int32_t v)
             return l;
     }
     return N_MDST[v];
+}
+
+/* ---- RingsClouds (PORTING_NOTES.md section 6): the sources onto CLOUDS' destinations, once a block ----
+ * mod_pre runs on the first core before the parts (fx.c mix_block), after the tracks' LFOs of the block before: it ticks
+ * LFO B, then adds every slot whose destination is a Clouds knob (MD_CPOS .. MD_CREV: AMT 64 at a full source = the
+ * knob's whole range, as the engine parameters) into mod_cld[], and reads the gates (MD_CFRZ: held while source x AMT >
+ * half scale; MD_CTRG: the rising edge of the same). A per-voice source takes the latest note's value as on the other
+ * per-block destinations. Nothing here touches t->p. fx_clouds.c cld_params adds mod_cld[] to song.cp (clamped) */
+static const uint8_t MOD_CK[] = {CP_POS, CP_SIZE, CP_PTCH, CP_DENS, CP_TEX, CP_WET, CP_SPRD, CP_FDBK, CP_REV};
+static uint8_t mod_cprev;
+static __attribute__((noinline)) void mod_pre(void)
+{
+    uint32_t i, k, gate = 0;
+    if (!RC_ON)
+        return;
+    memset(mod_cld, 0, sizeof mod_cld);
+    for (i = 0; i < NTRK; i++) {
+        const track_t *t = &trk[i];
+        const int16_t *p = t->p;
+        int32_t lfo = 0;
+        lb_tick(t, i);
+        for (k = 0; k < NMSLOT; k++) {
+            uint32_t s = (uint32_t)p[P_M1SRC + 3u * k], d = (uint32_t)p[P_M1DST + 3u * k];
+            int32_t a = p[P_M1AMT + 3u * k], x;
+            if (!s || !a || s >= MS_N || d < MD_CPOS || d >= MD_N)
+                continue;
+            if (s == MS_LFO) {
+                lfo = mulq15(t->lfo_val, t->lfo_fade);
+                lfo = mulq15(lfo, mod_depth(t, lfo));
+            }
+            x = mod_tsrc(t, s, lfo);
+            if (MD_CLOUDS(d)) {
+                const param_desc_t *pd = &CPD[MOD_CK[d - MD_CPOS]];
+                mod_cld[MOD_CK[d - MD_CPOS]] += (((x * a) >> 6) * (pd->max - pd->min)) >> 15;
+            } else if (((x * a) >> 6) > 16384) {
+                gate |= d == MD_CFRZ ? 1u : 2u;
+            }
+        }
+    }
+    mod_cfrz = (uint8_t)(gate & 1u);
+    mod_ctrg = (uint8_t)((gate & 2u) && !(mod_cprev & 2u));
+    mod_cprev = (uint8_t)gate;
 }

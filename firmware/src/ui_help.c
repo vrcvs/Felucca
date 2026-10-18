@@ -20,6 +20,8 @@ static const struct { const char *title, *hint; } HELP_PAGE[] = {
     {"LFO 2", "[K1]SYNC TO BPM[LFO]LFO DEST"},
     {"LFO DEST", "[K1-4]LFO AMOUNTS[LFO]MOD"},
     {"MOD", "[K1]SLOT[K2]SOURCE[K3]DEST"},
+    {"LFO B", "[K1-4]MATRIX LFO[LFO]MOD SRC"},   /* (RingsClouds) */
+    {"MOD SRC", "[K1]STEP[K2]CC[K3]CLOUDS STEP"},
     {"FX", "[K1-4]SENDS[FX]HOLD: PERFORM"},
     {"SLICER", "[K1]ON[K2]PATTERN[FX]INSERT"},
     {"INSERT", "[K1]TYPE[FX]DRY / WET"},

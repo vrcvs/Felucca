@@ -226,6 +226,19 @@ static const uint8_t MIDI_CC_ENG[NENGINES] = {
     0x80,                                             /* SLICE TONE */
 #endif
 };
+/* RingsClouds' CC map (PORTING_NOTES.md section 6), always on like the standard one, a learned CC first:
+ *   CC20..27  CLOUDS POSN SIZE PTCH DENS TEXT WET SPRD FDBK     CC102 REV   103 MODE (0..127 over OFF .. SPEC)
+ *   CC104 QUAL  105 SRC  106 TRIG mode   107 FREEZE (>= 64 on, as a held key; CC121 off)   108 TRIG (a pulse on >= 64)
+ *   CC109..116  RINGS: the track's E1..E8 (the PHYS engine's parameters; any engine's own E1..E8)
+ *   CC117..119  the matrix's LFO B RATE WAVE SYNC
+ * CLOUDS' are the project's (one set, whatever channel); the rest are the track the channel plays */
+static const int8_t MIDI_CC_CLD[8] = {CP_POS, CP_SIZE, CP_PTCH, CP_DENS, CP_TEX, CP_WET, CP_SPRD, CP_FDBK};
+static void midi_cp_set(uint32_t k, uint32_t value)
+{
+    const param_desc_t *d = &CPD[k];
+    song.cp[k] = (int16_t)(d->min + ((int32_t)value * (d->max - d->min) + 63) / 127);
+}
+static int midi_rc(track_t *t, uint32_t cc, uint32_t value);
 /* a CC sets parameter id of track t as a knob would: 0..127 over its range */
 static void midi_cc_set(track_t *t, uint32_t id, uint32_t value)
 {
@@ -283,10 +296,37 @@ static int __attribute__((noinline)) midi_learned(uint32_t cc, uint32_t value)
     return hit;
 }
 
+static int __attribute__((noinline)) midi_rc(track_t *t, uint32_t cc, uint32_t value)
+{
+    static const uint8_t CP102[5] = {CP_REV, CP_MODE, CP_QUAL, CP_SRC, CP_TRIG};
+    static uint8_t trg_on;
+    if (!RC_ON)
+        return 0;
+    if (cc >= 20u && cc <= 27u)
+        midi_cp_set((uint32_t)MIDI_CC_CLD[cc - 20u], value);
+    else if (cc >= 102u && cc <= 106u)
+        midi_cp_set(CP102[cc - 102u], value);
+    else if (cc == 107u)
+        cl_cc_frz = value >= 64u;
+    else if (cc == 108u) {
+        if (value >= 64u && !trg_on)
+            cl_cc_trg = 1;
+        trg_on = value >= 64u;
+    } else if (cc >= 109u && cc <= 116u)
+        midi_cc_set(t, P_E0 + cc - 109u, value);
+    else if (cc >= 117u && cc <= 119u)
+        midi_cc_set(t, cc == 117u ? P_LBRATE : cc == 118u ? P_LBWAVE : P_LBSYNC, value);
+    else
+        return 0;
+    return 1;
+}
+
 static void __attribute__((noinline)) midi_cc_map(track_t *t, uint32_t cc, uint32_t value)
 {
     uint32_t i, id = 0xFFFFu, e;
     if (midi_learned(cc, value))                /* (a learned CC is the user's: not the map's) */
+        return;
+    if (midi_rc(t, cc, value))                  /* (RingsClouds: CLOUDS, the E1..E8 of RINGS, LFO B) */
         return;
     for (i = 0; i < NELEM(MIDI_CC_MAP); i++)
         if (MIDI_CC_MAP[i][0] == cc)
@@ -331,6 +371,7 @@ static void midi_control(uint32_t ch, uint32_t cc, uint32_t value)
     case 121:                                      /* Reset All Controllers, keep bend sensitivity */
         c->bend = 0;
         c->wheel = 0;
+        cl_cc_frz = 0;                             /* (RingsClouds: CC107's freeze) */
         c->rpn_msb = c->rpn_lsb = 127;
         midi_expression_channel(ch);
         midi_pedal_up(ch);

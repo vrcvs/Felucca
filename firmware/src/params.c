@@ -8,6 +8,7 @@ static const char *const N_LSYNC[] = {"OFF", "4BAR", "2BAR", "1/1", "1/2", "1/4"
 static const uint8_t LSYNC_DIV[11] = {0, 9, 8, 7, 6, 0, 1, 4, 2, 5, 3};
 static const char *const N_LTRIG[] = {"NOTE", "FREE"};
 static const char *const N_LPOL[] = {"BI", "UNI"};
+static const char *const N_CSEQ[] = {"OFF", "TRIG", "FRZ", "BOTH"};   /* a step's Clouds action (RingsClouds, P_CSEQ) */
 static const char *const N_AMODE[] = {"OFF", "UP", "DN", "UPDN", "RND", "ORD", "REPEAT",   /* (append-only: seq.c AM_*) */
                                        "DNUP", "UP+8", "CONV", "DIVG", "PINKY", "THUMB", "WALK", "CHORD"};
 static const char *const N_DIV[] = {"1/4", "1/8", "1/16", "1/32", "8T", "16T", "1/2", "1/1", "2BAR", "4BAR"};
@@ -67,9 +68,13 @@ static const char *const N_IRATE[] = {"689", "919", "1.1k", "1.4k", "1.8k", "2.2
 /* modulation matrix (mod.c): sources, destinations (E1..E8 = P_E0..P_E7: shown with the engine's labels).
  * Append-only (stored values keep their meaning): S&H SLEW and DEPTH (#132) came after EXPR and E8; VEL and TIME
  * (1.5.6, #213: at the note) after DEPTH */
-static const char *const N_MSRC[] = {"OFF", "LFO", "ENV", "VEL", "KEY", "RAND", "MODW", "AT", "EXPR", "S&H", "SLEW"};
+static const char *const N_MSRC[] = {"OFF", "LFO", "ENV", "VEL", "KEY", "RAND", "MODW", "AT", "EXPR", "S&H", "SLEW",
+                                     "LFOB", "STEP", "CC"};   /* (RingsClouds: LFO B, the step's STEP value, MIDI CC) */
 static const char *const N_MDST[] = {"OFF", "PITCH", "CUT", "SHP", "AMP", "PAN", "DIST", "CHO", "DLY", "REV", "RATE",
-                                     "VIB", "E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "DEPTH", "VEL", "TIME"};
+                                     "VIB", "E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "DEPTH", "VEL", "TIME",
+                                     /* RingsClouds: CLOUDS' knobs (a source is added to the knob), then its gates */
+                                     "CPOS", "CSIZE", "CPTCH", "CDENS", "CTEX", "CWET", "CSPRD", "CFDBK", "CREV",
+                                     "CFRZ", "CTRG"};
 static const char *const N_ENGNAME[] = {"ANALOG", FELUCCA_FM4 ? "DIGITAL" : "-", "PHASE", "LOFI", "SAMPLE", "VOICE", "TRIO", "WHEEL", "GRAIN", "PHYS",
                                              "DRUM", "NOISE", "FM6",
 #if FELUCCA_SLICE
@@ -89,7 +94,7 @@ static const param_desc_t TP[P_COUNT] = {
     [P_ED_FLT] = PD("FLT", F_BIPCT, -64, 63, 0),
     [P_ED_PIT] = PD("PIT", F_BIPCT, -64, 63, 0),
     [P_ED_SHP] = PD("SHP", F_BIPCT, -64, 63, 0),
-    [P_ED_FX] = PD("FX", F_BIPCT, -64, 63, 0),
+    [P_ED_FX] = PD("STEP", F_BIPCT, -64, 63, 0),   /* RingsClouds: the STEP source (was unused: "FX") */
     [P_LRATE] = PD("RATE", F_LFOHZ, 0, 127, 60),
     [P_LWAVE] = PE("WAVE", N_LWAVE, 0),
     [P_LPHASE] = PD("PHS", F_INT, 0, 127, 0),
@@ -137,12 +142,30 @@ static const param_desc_t TP[P_COUNT] = {
 /* the OP ENV / OP LEVEL values of DIGITAL (ids 61..80): with FELUCCA_FM4 its operator envelopes; without it
  * inert, on no page and in no editor layout, read only when a DIGITAL sound converts (fm4_convert.c). Their labels
  * stay: the editor's library files key parameters by label ("ATK#2" ..), so an old file's values still find them */
+/* RingsClouds (core.h P_LBRATE ..): without FM4 the ids FM1 ATK/DEC/REL and FM2 ATK/DEC/REL carry the LFO B / CC / CSEQ
+ * parameters, their descriptors below overriding these */
 #define FMOP(k) [P_FM##k##_ATK] = PD("ATK", F_TIME, 0, 127, 0), \
                 [P_FM##k##_DEC] = PD("DEC", F_TIME, 0, 127, 0), \
                 [P_FM##k##_SUS] = PD("SUS", F_PCT, 0, 127, 127), \
                 [P_FM##k##_REL] = PD("REL", F_TIME, 0, 127, 0), \
                 [P_FM##k##_LEVEL] = PD("LVL", F_PCT, 0, 127, 127)
+#if FELUCCA_FM4
     FMOP(1), FMOP(2), FMOP(3), FMOP(4),
+#else
+    /* RingsClouds (core.h P_LBRATE ..): FM1 ATK DEC REL and FM2 ATK DEC REL carry the LFO B / CC / CSEQ parameters (ids
+     * with default 0 in every stored project: 0 = the feature off); the rest stay inert as before */
+    [P_LBRATE] = PD("RATE", F_LFOHZ, 0, 127, 60),
+    [P_LBWAVE] = PE("WAVE", N_LWAVE, 0),
+    [P_FM1_SUS] = PD("SUS", F_PCT, 0, 127, 127),
+    [P_LBSYNC] = PE("SYNC", N_LSYNC, 0),
+    [P_FM1_LEVEL] = PD("LVL", F_PCT, 0, 127, 127),
+    [P_LBPOL] = PE("POL", N_LPOL, 0),
+    [P_MCCN] = PD("CC#", F_INT, 0, 127, 74),
+    [P_FM2_SUS] = PD("SUS", F_PCT, 0, 127, 127),
+    [P_CSEQ] = PE("CSEQ", N_CSEQ, 0),
+    [P_FM2_LEVEL] = PD("LVL", F_PCT, 0, 127, 127),
+    FMOP(3), FMOP(4),
+#endif
 #undef FMOP
     [P_CHRD] = PE("CHRD", N_CHRD, 0),
     [P_VOIC] = PE("VOIC", N_VOIC, 0),
@@ -472,6 +495,10 @@ static const page_t PAGES[] = {
     {"LFO 2", FAM_LFO, SC_TRACK, GR_LFO, {P_LSYNC, P_LTRIG, P_LPOL, 0xFF}},   /* 1.2: SYNC TRIG POL */
     {"LFO DEST", FAM_LFO, SC_TRACK, GR_NONE, {P_LD_PIT, P_LD_FLT, P_LD_SHP, P_LD_AMP}},
     {"MOD", FAM_LFO, SC_TRACK, GR_MOD, {0xFF, P_M1SRC, P_M1DST, P_M1AMT}},   /* KNOB 1: the slot (mod_ui_slot) */
+#if !FELUCCA_FM4
+    {"LFO B", FAM_LFO, SC_TRACK, GR_NONE, {P_LBRATE, P_LBWAVE, P_LBSYNC, P_LBPOL}},   /* RingsClouds: the matrix's 2nd LFO */
+    {"MOD SRC", FAM_LFO, SC_TRACK, GR_NONE, {P_STEPV, P_MCCN, P_CSEQ, 0xFF}},   /* .. STEP (lockable), the CC, CLOUDS' step */
+#endif
     {"FX", FAM_FX, SC_TRACK, GR_FX, {P_DIST, P_CHOR, P_DLY, P_REV}},
     {"SLICER", FAM_FX, SC_TRACK, GR_SLCR, {P_SLCR, P_SLPAT, P_SLRATE, P_SLDEPTH}},
     {"INSERT", FAM_FX, SC_TRACK, GR_INS, {P_ITYPE, P_IA, P_IB, P_IC}},   /* 1.5: the track's INSERT (fx.c) */

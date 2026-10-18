@@ -95,6 +95,8 @@
 #                   the transport playing: the roll's bank is the playhead's (STEP and DETAIL), the cursor and the pattern
 #                   untouched; not for 16 steps, stopped, DRUM's grid, AUTOMATION, HOME; held from a knob's move of the
 #                   cursor, an edit of its step or step entry, free again after 3 s or one pass round; reset by stop / track.
+# MODRC (tests/modrc_test.c): RingsClouds' mod matrix (PORTING_NOTES.md section 6): the sources LFO B, STEP and CC, the CLOUDS
+#                   destinations (knobs, FREEZE, TRIG), the FX keys, a step's CSEQ lock, the MIDI CC map; one core = two.
 # MOD (tests/mod_test.c): the modulation matrix: slots that do nothing are bit-identical, every source on each
 #                   kind of destination, clamping, MIDI CC1 / CC11 / aftertouch routing, the cost of 4 active
 #                   slots (at most +5 %), demos in build/mod_demo/.
@@ -397,6 +399,9 @@ if [ -f build/gen/felucca_tables.h ]; then
     $CC -O2 -w -Ibuild/gen -Ifirmware/src -pthread -o "$OUT/clouds_test" tests/clouds_test.c -lm
     run "CLOUDS in the mix: modes, FREEZE, WET 0, SRC, MODE switched, the delay's line back, one core and two" \
         "$OUT/clouds_test"
+    $CC -O2 -w -Ibuild/gen -Ifirmware/src -Itests -pthread -o "$OUT/modrc_test" tests/modrc_test.c -lm
+    run "RingsClouds mod matrix: LFO B / STEP / CC sources, CLOUDS destinations and gates, keys, CSEQ, MIDI CC map, one core and two" \
+        "$OUT/modrc_test"
     if [ -n "$TSAN" ]; then                     # TSAN=1: the same under ThreadSanitizer (~6 min): shared state
         TSAN_CC="cc -O1 -g -w -Ibuild/gen -Ifirmware/src -fsanitize=thread -pthread"
         $TSAN_CC -o "$OUT/dualcore_tsan" tests/dualcore_test.c -lm

@@ -73,6 +73,23 @@ enum {                          /* per-track parameters */
     P_COUNT
 };
 
+/* RingsClouds mod matrix (mod.c; PORTING_NOTES.md section 6). FUN10 has no spare byte for new per-track parameters, so
+ * the inert ids of DIGITAL's operator envelopes (P_FM*: only used with FELUCCA_FM4) and the unused P_ED_FX carry them.
+ * Only ids whose default was 0 are used (ATK DEC REL of ops 1, 2): a project stored before holds 0 there, which for every
+ * one of them is "off". With FELUCCA_FM4 DIGITAL has the ids back and these features are inert (RC_ON 0). */
+#define RC_ON (!FELUCCA_FM4)
+#define P_STEPV P_ED_FX              /* STEP: the step's value for the matrix (lockable, -64..63) */
+#define P_LBRATE P_FM1_ATK           /* LFO B: RATE, WAVE, SYNC, POL */
+#define P_LBWAVE P_FM1_DEC
+#define P_LBSYNC P_FM1_REL
+#define P_LBPOL P_FM2_ATK
+#define P_MCCN P_FM2_DEC             /* the MIDI CC the matrix's CC source follows (0 = CC0) */
+#define P_CSEQ P_FM2_REL             /* the step's Clouds action (lockable): OFF, TRIG, FRZ, BOTH */
+/* the ids the engine-id tests (motion.c, project.c) must not take for DIGITAL's */
+#define P_IS_RC(id) (RC_ON && ((id) == P_LBRATE || (id) == P_LBWAVE || (id) == P_LBSYNC || (id) == P_LBPOL || \
+                               (id) == P_MCCN || (id) == P_CSEQ))
+#define P_IS_FM(id) ((id) >= P_FM1_ATK && (id) <= P_FM4_LEVEL && !P_IS_RC(id))
+
 enum {                          /* global parameters */
     G_BPM, G_SWING, G_CLOCK, G_TUNE,
     G_DTIME, G_DFDBK, G_DCOLOR, G_DMIX,
@@ -373,6 +390,13 @@ typedef struct {
 
 static track_t trk[NTRK];        /* the instrument: four parts */
 static uint8_t cl_noteon;        /* CLOUDS' TRIG (fx_clouds.c): bit k, part k started a note since the last block */
+/* RingsClouds mod matrix (mod.c, fx_clouds.c): Clouds' TRIG / FREEZE from the keys (perform.c PF_CTRG, PF_CFRZ), the
+ * sequencer's steps (P_CSEQ) and MIDI (midi_control.c); the main loop sets, the next block's cld_params takes */
+static uint8_t cl_seq_trg;       /* a step with CSEQ TRIG / BOTH started (seq.c seq_play) */
+static uint8_t cl_cc_trg;        /* MIDI CC TRIG pressed */
+static uint8_t cl_fx_trg;        /* the TRIG key pressed (perform.c) */
+static uint8_t cl_fx_frz;        /* the FREEZE key held (perform.c) */
+static uint8_t cl_cc_frz;        /* MIDI CC FREEZE on (>= 64) */
 static song_t song;
 #define TSEL (&trk[song.sel])    /* the selected track */
 /* MIDI IN TRACK: track i's channel 0..15, MCH_OMNI or MCH_OFF (song.mch), and set */

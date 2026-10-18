@@ -72,22 +72,45 @@ static uint32_t cld_route(void)
 
 static inline int32_t cld_q16(int32_t v) { return (clamp(v, 0, 127) * 65536 + 63) / 127; }
 
+/* RingsClouds: a knob with the matrix's offset (mod.c mod_pre: sources onto CPOS .. CREV), clamped to its range */
+static inline int32_t cld_knob(uint32_t k)
+{
+    return clamp(song.cp[k] + mod_cld[k], CPD[k].min, CPD[k].max);
+}
+/* FREEZE besides the FRZ knob: the FREEZE key held (perform.c), MIDI CC FREEZE, a track's CSEQ FRZ / BOTH (the step's lock, or
+ * the track's own), the matrix's CFRZ gate */
+static uint32_t cld_extra_freeze(void)
+{
+    uint32_t i, f = cl_fx_frz | cl_cc_frz | mod_cfrz;
+    for (i = 0; i < NTRK; i++)
+        f |= (uint32_t)(trk[i].p[P_CSEQ] >> 1) & 1u;
+    return f != 0;
+}
+/* TRIG besides a note: the TRIG key, MIDI CC TRIG, a step with CSEQ TRIG / BOTH, the matrix's CTRG gate (one block's pulse
+ * each, cleared here) */
+static uint32_t cld_extra_trig(void)
+{
+    uint32_t f = cl_fx_trg | cl_cc_trg | cl_seq_trg | mod_ctrg;
+    cl_fx_trg = cl_cc_trg = cl_seq_trg = 0;
+    return f != 0;
+}
+
 /* the knobs for Clouds (the main loop writes song.cp: read once a block, here) */
 static void cld_params(void)
 {
     cl_par_t *p = &cld.par;
     uint32_t trig = song.cp[CP_TRIG] == 1;
-    p->position = cld_q16(song.cp[CP_POS]);
-    p->size = cld_q16(song.cp[CP_SIZE]);
-    p->pitch = clamp(song.cp[CP_PTCH], -24, 24) << 16;
-    p->density = cld_q16(song.cp[CP_DENS]);
-    p->texture = cld_q16(song.cp[CP_TEX]);
-    p->dry_wet = cld_q16(song.cp[CP_WET]);
-    p->spread = cld_q16(song.cp[CP_SPRD]);
-    p->feedback = cld_q16(song.cp[CP_FDBK]);
-    p->reverb = cld_q16(song.cp[CP_REV]);
-    p->freeze = song.cp[CP_FRZ] != 0;
-    p->trigger = trig && (cl_noteon & cld.route);
+    p->position = cld_q16(cld_knob(CP_POS));
+    p->size = cld_q16(cld_knob(CP_SIZE));
+    p->pitch = clamp(cld_knob(CP_PTCH), -24, 24) << 16;
+    p->density = cld_q16(cld_knob(CP_DENS));
+    p->texture = cld_q16(cld_knob(CP_TEX));
+    p->dry_wet = cld_q16(cld_knob(CP_WET));
+    p->spread = cld_q16(cld_knob(CP_SPRD));
+    p->feedback = cld_q16(cld_knob(CP_FDBK));
+    p->reverb = cld_q16(cld_knob(CP_REV));
+    p->freeze = song.cp[CP_FRZ] != 0 || cld_extra_freeze();
+    p->trigger = (trig && (cl_noteon & cld.route)) || cld_extra_trig();
     p->gate = 0;
     if (trig) {                                          /* the gate: a key of a part going through held */
         uint32_t i, k;
@@ -179,8 +202,10 @@ static int clouds_pre(uint32_t n)
         break;
     }
     cld.route = cld.bus != BUS_OFF ? (uint8_t)cld_route() : 0u;
-    if (cld.bus == BUS_OFF)
+    if (cld.bus == BUS_OFF) {
+        cl_fx_trg = cl_cc_trg = cl_seq_trg = 0;
         return 0;
+    }
     memset(cld.h->cap, 0, sizeof cld.h->cap);
     if (cld.bus != BUS_ARM) {
         cld_params();
@@ -189,6 +214,7 @@ static int clouds_pre(uint32_t n)
         return 1;
     }
     cl_noteon = 0;
+    cl_fx_trg = cl_cc_trg = cl_seq_trg = 0;              /* (RingsClouds: pulses for a bus that is not running are lost) */
     return 0;
 }
 

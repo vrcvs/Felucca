@@ -821,7 +821,7 @@ static int auto_list(void)
         str_eq(ui.msg, "AUTOMATION FULL") && !act_ready());
     motion_clear(&trk[1]);
     for (i = 0; i < P_COUNT; i++)                        /* names: an id each, none of DIGITAL's, lanes on DRUM only */
-        if (ev_id_ok(t, i) && ((i >= P_FM1_ATK && i <= P_FM4_LEVEL) || (i >= P_LN0 && i <= P_LN7) || !motion_param(i)))
+        if (ev_id_ok(t, i) && (P_IS_FM(i) || (i >= P_LN0 && i <= P_LN7) || !motion_param(i)))
             break;
     bad += check("  KNOB 3's list: what motion records and the sound has (no OP ENV, no DRUM lanes off DRUM)", i == P_COUNT &&
         ev_id_ok(&trk[3], P_LN0));

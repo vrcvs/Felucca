@@ -47,8 +47,10 @@
  * PF_M1), then the mutes of the black keys */
 enum { PF_R8, PF_R16, PF_R32, PF_REV, PF_LPF, PF_HPF, PF_TAPE, PF_FRZ, PF_OUP, PF_ODN, PF_FLG, PF_PHS,
        PF_RTHR, PF_ETHR,                      /* 1.5.1: REV THROW, ECHO THROW */
+       PF_CFRZ, PF_CTRG,                      /* RingsClouds: CLOUDS' FREEZE (held) and TRIG (a pulse): no stage here, fx_clouds.c */
        PF_M1, PF_N = PF_M1 + NTRK };
 #define PF_NFX PF_M1                          /* the effects a white key can hold */
+#define PF_CL (PF_BIT(PF_CFRZ) | PF_BIT(PF_CTRG))   /* .. the effects that are CLOUDS' (never in held below) */
 #define PF_KEYS 16u                           /* the white keys F3 .. G5 */
 #define PF_BIT(e) (1u << (e))
 #define PF_REPEAT 0x7u                                         /* the three REPEAT rates */
@@ -80,9 +82,9 @@ enum { BM_NONE, BM_LOOP, BM_TAPE, BM_FRZ, BM_HARM };
 /* the white keys' effects by default (1.1.5's ten, then FLANGER and PHASER, 1.5.1's REV THROW and ECHO THROW on D5
  * and E5; PF_N: none) */
 static const uint8_t PF_DEF[PF_KEYS] = {PF_R8, PF_R16, PF_R32, PF_REV, PF_LPF, PF_HPF, PF_TAPE, PF_FRZ, PF_OUP, PF_ODN,
-                                        PF_FLG, PF_PHS, PF_RTHR, PF_ETHR, PF_N, PF_N};
+                                        PF_FLG, PF_PHS, PF_RTHR, PF_ETHR, PF_CFRZ, PF_CTRG};
 static volatile uint8_t perf_map[PF_KEYS] = {PF_R8, PF_R16, PF_R32, PF_REV, PF_LPF, PF_HPF, PF_TAPE, PF_FRZ, PF_OUP,
-                                             PF_ODN, PF_FLG, PF_PHS, PF_RTHR, PF_ETHR, PF_N, PF_N};
+                                             PF_ODN, PF_FLG, PF_PHS, PF_RTHR, PF_ETHR, PF_CFRZ, PF_CTRG};
                                       /* main: white key p's effect (PF_N none), from the settings (ui_layer.c) */
 static volatile uint8_t perf_remap;   /* main: perf_map changed (seq.c: a key held takes its new effect) */
 
@@ -192,12 +194,16 @@ static void perf_press(uint32_t e, int down)
         if (down) {
             perf_latched ^= PF_BIT(e);
             perf_ord[e] = ++perf_seq;
+            if (e == PF_CTRG)
+                cl_fx_trg = 1;
         }
         return;
     }
     if (down) {
         perf_held |= PF_BIT(e);
         perf_ord[e] = ++perf_seq;
+        if (e == PF_CTRG)
+            cl_fx_trg = 1;
     } else {
         perf_held &= ~PF_BIT(e);
     }
@@ -301,6 +307,8 @@ static __attribute__((noinline)) int perf_begin(uint32_t n)
     uint32_t held = perf_kill ? 0u : (perf_held | perf_latched | (perf_solo ? (~(uint32_t)perf_solo & 15u) << PF_M1 : 0u)) & perf_avail();
     uint32_t q, k, ph0, bnd;
     int32_t m;
+    cl_fx_frz = (uint8_t)((held >> PF_CFRZ) & 1u);   /* RingsClouds: FREEZE is held while its key is (or latched) */
+    held &= ~PF_CL;                                 /* (CLOUDS' keys: no stage, the idle shortcut below stays) */
     if (!held && !pf.busy && !(perf_k[0] | perf_k[1] | perf_k[2])) {   /* idle: the clock only */
         pf.ph += n;
         pf.sync = 0;
