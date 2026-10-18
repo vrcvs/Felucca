@@ -89,6 +89,8 @@ static struct {                          /* HALL's state (in the pool: no .bss) 
 } hl __attribute__((section(".pool")));
 #define rev_side (hl.sd)
 
+#include "fx_clouds.c"                   /* CLOUDS (RingsClouds): Clouds after the PHYS parts, in the delay's line */
+
 /* DIST: low cut -> drive (1x..8x, exponential) -> asymmetric soft clip
  * (a little bias = even harmonics) -> tone low-pass that closes with drive ->
  * make-up gain (straight into tanh over the full band, it would sound like a
@@ -507,7 +509,8 @@ static void rev_clear(void)
 #if FELUCCA_CPU2
 /* the dry mix and the sends, as each core adds its parts into them (after Jangada: mx[1] is the second core's,
  * mix_block), and a part's own block (b; mx[0].b also the fade of a reverb model change, after the parts) */
-typedef struct { int32_t l[CTL], r[CTL], c[CTL], d[CTL], v[CTL], b[CTL]; } mixsum_t;
+typedef struct { int32_t l[CTL], r[CTL], c[CTL], d[CTL], v[CTL], b[CTL]; int32_t *xl, *xr; } mixsum_t;   /* xl, xr:
+                                                         * CLOUDS' bus (fx_clouds.c cap: the parts that go through) */
 static mixsum_t mx[2];
 #define mix_l (mx[0].l)
 #define mix_r (mx[0].r)
@@ -530,6 +533,9 @@ static int32_t part_buf[CTL];                            /* a part's block (mix_
 #define SM1_d send_d
 #define SM1_v send_r
 #define SM1_b part_buf
+static int32_t *cld_xl, *cld_xr;                         /* CLOUDS' bus (fx_clouds.c cap) */
+#define SM1_xl cld_xl
+#define SM1_xr cld_xr
 #endif
 
 /* the model changed (to rt): the old one's block fades out (HALL's stereo difference with it), its buffers are
@@ -554,6 +560,36 @@ static __attribute__((noinline)) void rev_switch(const int32_t *rev_in, int32_t 
     fx.rtype = (uint8_t)rt;
 }
 
+/* the chorus and delay of fx_buses while CLOUDS takes or has the delay's line (fx_clouds.c cld_delay): taking it, the
+ * delay runs this block and its output fades out; then the chorus alone (the delay neither read nor written) */
+static __attribute__((noinline)) void fx_buses_cld(const int32_t *cho_in, const int32_t *dly_in, int32_t *wet, uint32_t n,
+                                                   uint32_t dl, int32_t fb, int32_t col, int32_t dmix, int32_t cdepth,
+                                                   uint32_t cinc)
+{
+    uint32_t i, fade = cld_delay() == 1u;
+    for (i = 0; i < n; i++) {
+        int32_t y = 0, r;
+        cho_buf[fx.cho_w & (CHO_LEN - 1u)] = (int16_t)clamp(cho_in[i] >> 1, -32768, 32767);
+        fx.cho_ph += cinc;
+        r = (400 << 8) + ((osc_sine(fx.cho_ph) + 32768) * cdepth >> 8);
+        {
+            uint32_t ri = (uint32_t)r >> 8;
+            int32_t f = r & 255, c0 = cho_buf[(fx.cho_w - ri) & (CHO_LEN - 1u)];
+            int32_t c1 = cho_buf[(fx.cho_w - ri - 1u) & (CHO_LEN - 1u)];
+            y += (c0 + (((c1 - c0) * f) >> 8)) << 1;
+        }
+        fx.cho_w++;
+        if (fade) {
+            int32_t x = dly_buf[(fx.dly_w - dl) & (DLY_LEN - 1u)];
+            fx.dly_lp += mulq15(x - fx.dly_lp, col);
+            dly_buf[fx.dly_w & (DLY_LEN - 1u)] = (int16_t)clamp((dly_in[i] >> 1) + mulq15(fx.dly_lp, fb), -32768, 32767);
+            fx.dly_w++;
+            y += mulq15(mulq15(x << 1, dmix), (int32_t)(((n - i) << 15) / n));
+        }
+        wet[i] = y;
+    }
+}
+
 /* process the three buses for one block; sends in, wet stereo-equal out */
 static void fx_buses(const int32_t *cho_in, const int32_t *dly_in, const int32_t *rev_in, int32_t *wet,
                      uint32_t n)
@@ -566,7 +602,9 @@ static void fx_buses(const int32_t *cho_in, const int32_t *dly_in, const int32_t
     if (pf.ew1 && fb < THR_FB)
         fb += mulq16(THR_FB - fb, (uint32_t)pf.ew1 << 1);   /* ECHO THROW (perform.c): more feedback while held, 0.7
                                                              * at most (the loop's gain below 1: it never runs away) */
-    for (i = 0; i < n; i++) {
+    if (cld_delay())                                    /* CLOUDS has the delay's line (fx_clouds.c): the chorus alone, */
+        fx_buses_cld(cho_in, dly_in, wet, n, dl, fb, col, dmix, cdepth, cinc);   /* the delay fading out first */
+    else for (i = 0; i < n; i++) {
         int32_t y = 0, x, r;
         /* chorus: modulated short delay, 5..15 ms */
         cho_buf[fx.cho_w & (CHO_LEN - 1u)] = (int16_t)clamp(cho_in[i] >> 1, -32768, 32767);
@@ -831,8 +869,12 @@ static __attribute__((noinline)) void mix_spread(track_t *t, int32_t *b, uint32_
     int32_t glb = 4096 - (pb > 0 ? pb * 64 : 0), grb = 4096 + (pb < 0 ? pb * 64 : 0);
     int32_t glm = (gla + glb) >> 1, grm = (gra + grb) >> 1, gld = (gla - glb) >> 1, grd = (gra - grb) >> 1;
     int32_t c = t->p[P_CHOR] * 258, dl = t->p[P_DLY] * 258, r = t->p[P_REV] * 258, pk = t->peak;
-    int32_t xmax = c > dl ? c : dl;
+    int32_t xmax = c > dl ? c : dl, *ML = SM(l), *MR = SM(r);
     xmax = 0x7FFFFFFF / ((xmax > r ? xmax : r) | 1);
+    if (cld.route >> (t - trk) & 1u) {                  /* CLOUDS: this part goes through its bus (fx_clouds.c) */
+        ML = SM(xl);
+        MR = SM(xr);
+    }
     for (i = 0; i < n; i++)
         d[i] = (d[i] << 1) - b[i];                      /* left - right */
     track_dist(t, b, n);
@@ -852,8 +894,8 @@ static __attribute__((noinline)) void mix_spread(track_t *t, int32_t *b, uint32_
             SM(d)[i] += mulq15(xs, dl);
         if (r)
             SM(v)[i] += mulq15(xs, r);
-        SM(l)[i] += ((x * glm) >> 12) + ((y * gld) >> 12);
-        SM(r)[i] += ((x * grm) >> 12) + ((y * grd) >> 12);
+        ML[i] += ((x * glm) >> 12) + ((y * gld) >> 12);
+        MR[i] += ((x * grm) >> 12) + ((y * grd) >> 12);
     }
     t->peak = pk;
 }
@@ -915,8 +957,12 @@ static void mix_part(track_t *t, uint32_t n SM_DECL)
         int32_t lvl = LEVEL_Q12[t->p[P_LEVEL] & 127], pan = t->p[P_PAN];
         int32_t gl = 4096 - (pan > 0 ? pan * 64 : 0), gr = 4096 + (pan < 0 ? pan * 64 : 0);
         int32_t c = t->p[P_CHOR] * 258, d = t->p[P_DLY] * 258, r = t->p[P_REV] * 258, pk = t->peak;
-        int32_t xmax = c > d ? c : d;
+        int32_t xmax = c > d ? c : d, *ML = SM(l), *MR = SM(r);
         xmax = 0x7FFFFFFF / ((xmax > r ? xmax : r) | 1);   /* sends: loud chords at a high LEVEL */
+        if (cld.route >> (t - trk) & 1u) {              /* CLOUDS: this part goes through its bus (fx_clouds.c) */
+            ML = SM(xl);
+            MR = SM(xr);
+        }
         for (i = 0; i < n; i++) {
             int32_t x = ((b[i] >> 2) * lvl) >> 10, a = x < 0 ? -x : x;   /* pre-shift: 8 loud voices */
             int32_t xs = clamp(x, -xmax, xmax);         /* sends: mulq15 would overflow */
@@ -928,8 +974,8 @@ static void mix_part(track_t *t, uint32_t n SM_DECL)
                 SM(d)[i] += mulq15(xs, d);
             if (r)
                 SM(v)[i] += mulq15(xs, r);
-            SM(l)[i] += (x * gl) >> 12;
-            SM(r)[i] += (x * gr) >> 12;
+            ML[i] += (x * gl) >> 12;
+            MR[i] += (x * gr) >> 12;
         }
         t->peak = pk;
     }
@@ -993,12 +1039,15 @@ static __attribute__((noinline)) void perf_master(int32_t *out, uint32_t n)
 #endif
 static uint32_t c1_blocks;                              /* blocks the second core took parts of (console) */
 
-static void c1_parts(uint32_t arg)                      /* arg: the parts (bit k = part k) | n << 8 */
+#define C1_CLD (1u << NPART)                             /* c1_parts' arg, mix_split: CLOUDS (fx_clouds.c) too */
+static void c1_parts(uint32_t arg)                      /* arg: the parts (bit k = part k) | C1_CLD | n << 8 */
 {
     uint32_t i, n = arg >> 8;
     mixsum_t *sm = &mx[1];
     for (i = 0; i < n; i++)
         sm->l[i] = sm->r[i] = sm->c[i] = sm->d[i] = sm->v[i] = 0;
+    if (arg & C1_CLD)                                   /* Clouds on the block before: its own state only */
+        clouds_run(n);
     for (i = 0; i < NPART; i++)
         if (arg >> i & 1u)
             mix_part(&trk[i], n, sm);
@@ -1009,12 +1058,13 @@ static void c1_parts(uint32_t arg)                      /* arg: the parts (bit k
 #define C1_HAND 40u
 static uint32_t mix_split(void)
 {
-    uint32_t m, i, best = 0, all = 0, lo;
+    uint32_t m, i, best = 0, all = 0, lo, cc = cld_cost(), k = cc ? NPART + 1u : NPART;   /* (CLOUDS: a fifth) */
     for (i = 0; i < NPART; i++)
         all += part_cost[i];
+    all += cc;
     lo = all;
-    for (m = 1; m < (1u << NPART) - 1u; m++) {
-        uint32_t a = 0, w;
+    for (m = 1; m < (1u << k) - 1u; m++) {
+        uint32_t a = m & C1_CLD ? cc : 0u, w;
         for (i = 0; i < NPART; i++)
             if (m >> i & 1u)
                 a += part_cost[i];
@@ -1037,8 +1087,15 @@ static void mix_block(int32_t *out, uint32_t n)
         send_c[i] = send_d[i] = send_r[i] = mix_l[i] = mix_r[i] = 0;
     events_block(n);
     perf = perf_begin(n);                               /* the FX hold layer at work (perform.c) */
+    int cl = clouds_pre(n);                             /* CLOUDS (fx_clouds.c): the bus this block */
 #if FELUCCA_CPU2
-    uint32_t m = C1_ON() ? C1_SPLIT() & ((1u << NPART) - 1u) : 0u;
+    if (cld.h) {                                        /* the parts that go through add into its cap */
+        mx[0].xl = cld.h->cap[0][0];
+        mx[0].xr = cld.h->cap[0][1];
+        mx[1].xl = cld.h->cap[1][0];
+        mx[1].xr = cld.h->cap[1][1];
+    }
+    uint32_t m = C1_ON() ? C1_SPLIT() & (((1u << NPART) - 1u) | (cl ? C1_CLD : 0u)) : 0u;
     if (m && !C1_RUN(c1_parts, m | n << 8))
         m = 0;
     c1_blocks += m != 0;
@@ -1056,13 +1113,24 @@ static void mix_block(int32_t *out, uint32_t n)
             send_d[i] += sm->d[i];
             send_r[i] += sm->v[i];
         }
+        if (cld.route)                                  /* the bus: the second core's parts that go through */
+            for (i = 0; i < n; i++) {
+                cld.h->cap[0][0][i] += cld.h->cap[1][0][i];
+                cld.h->cap[0][1][i] += cld.h->cap[1][1][i];
+            }
     }
     for (i = 0; i < NPART; i++)                         /* the LFOs' blocks, part by part (voice.c) */
         track_lfo_end(&trk[i]);
 #else
+    if (cld.h) {
+        cld_xl = cld.h->cap[0][0];
+        cld_xr = cld.h->cap[0][1];
+    }
     for (i = 0; i < NPART; i++)                         /* (one core: as 1.6) */
         mix_part(&trk[i], n);
 #endif
+    (void)cl;
+    clouds_post(mix_l, mix_r, n);                       /* .. and Clouds' output (or the bus's fades) in the dry mix */
     if (perf)
         perf_pre(mix_l, mix_r, send_d, send_r, n);
     fx_buses(send_c, send_d, send_r, wet, n);

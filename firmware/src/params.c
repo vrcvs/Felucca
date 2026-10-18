@@ -222,6 +222,28 @@ static const param_desc_t GP[G_COUNT] = {
     [G_DRREV] = PD("-", F_INT, 0, 0, 0),
 };
 
+/* CLOUDS (fx_clouds.c): the effect's knobs (core.h CP_*) */
+static const char *const N_CMODE[] = {"OFF", "GRAN", "STRT", "LOOP", "SPEC"};
+static const char *const N_CQUAL[] = {"HI ST", "HI MO", "LO ST", "LO MO"};
+static const char *const N_CSRC[] = {"PHYS", "T1", "T2", "T3", "T4", "ALL"};
+static const char *const N_CTRIG[] = {"OFF", "NOTE"};
+static const param_desc_t CPD[CP_COUNT] = {
+    [CP_MODE] = PE("MODE", N_CMODE, 0),
+    [CP_POS] = PD("POSN", F_PCT, 0, 127, 64),
+    [CP_SIZE] = PD("SIZE", F_PCT, 0, 127, 64),
+    [CP_PTCH] = PD("PTCH", F_SEMI, -24, 24, 0),
+    [CP_DENS] = PD("DENS", F_PCT, 0, 127, 100),
+    [CP_TEX] = PD("TEXT", F_PCT, 0, 127, 64),
+    [CP_FRZ] = PE("FRZ", N_ONOFF, 0),
+    [CP_QUAL] = PE("QUAL", N_CQUAL, 0),
+    [CP_WET] = PD("WET", F_PCT, 0, 127, 64),
+    [CP_SPRD] = PD("SPRD", F_PCT, 0, 127, 32),
+    [CP_FDBK] = PD("FDBK", F_PCT, 0, 127, 0),
+    [CP_REV] = PD("REV", F_PCT, 0, 127, 40),
+    [CP_SRC] = PE("SRC", N_CSRC, 0),
+    [CP_TRIG] = PE("TRIG", N_CTRIG, 0),
+};
+
 static const param_desc_t *track_desc(const track_t *t, uint32_t id)
 {
     if (id >= P_E0 && id <= P_E7) {                   /* the engine asked for (t->engine follows after a fade) */
@@ -457,6 +479,11 @@ static const page_t PAGES[] = {
     {"DLY", FAM_FX, SC_GLOBAL, GR_NONE, {G_DTIME, G_DFDBK, G_DCOLOR, G_DMIX}},
     {"REVERB", FAM_FX, SC_GLOBAL, GR_NONE, {G_RTYPE, G_RSIZE, G_RDAMP, 0xFF}},   /* TYPE: ROOM / SPRING / HALL */
     {"CHORUS", FAM_FX, SC_GLOBAL, GR_NONE, {G_CRATE, G_CDEPTH, 0xFF, 0xFF}},
+    /* CLOUDS (fx_clouds.c): its MODE and knobs; BLEND's four; the source and the trigger */
+    {"CLOUDS", FAM_FX, SC_GLOBAL, GR_NONE, {CP_ID0 + CP_MODE, CP_ID0 + CP_POS, CP_ID0 + CP_SIZE, CP_ID0 + CP_PTCH}},
+    {"CLOUDS 2", FAM_FX, SC_GLOBAL, GR_NONE, {CP_ID0 + CP_DENS, CP_ID0 + CP_TEX, CP_ID0 + CP_FRZ, CP_ID0 + CP_QUAL}},
+    {"BLEND", FAM_FX, SC_GLOBAL, GR_NONE, {CP_ID0 + CP_WET, CP_ID0 + CP_SPRD, CP_ID0 + CP_FDBK, CP_ID0 + CP_REV}},
+    {"CLOUDS 3", FAM_FX, SC_GLOBAL, GR_NONE, {CP_ID0 + CP_SRC, CP_ID0 + CP_TRIG, 0xFF, 0xFF}},
     {"SCL", FAM_SCL, SC_TRACK, GR_SCALE, {P_ROOT, P_SCALE, P_QUANT, P_TRANS}},
     {"CHORD", FAM_SCL, SC_TRACK, GR_CHORD, {P_CHRD, P_VOIC, 0xFF, 0xFF}},   /* SCL again: the chord keys (chord.c) */
     {"EDIT 1", FAM_EDIT, SC_ENGINE, GR_NONE, {P_E0, P_E1, P_E2, P_E3}},
@@ -511,6 +538,10 @@ static const param_desc_t *page_desc(const page_t *pg, uint32_t slot, int16_t **
     if (pg->scope == SC_STEP || pg->scope == SC_TRK) {
         *valp = 0;
         return 0;
+    }
+    if (pg->scope == SC_GLOBAL && id >= CP_ID0) {      /* CLOUDS' */
+        *valp = &song.cp[(id - CP_ID0) % CP_COUNT];
+        return &CPD[(id - CP_ID0) % CP_COUNT];
     }
     if (pg->scope == SC_GLOBAL) {
         *valp = &song.g[id];

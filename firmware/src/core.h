@@ -92,6 +92,20 @@ enum {                          /* global parameters */
     G_COUNT
 };
 
+/* CLOUDS (RingsClouds; fx_clouds.c): the effect's knobs, one set for the whole instrument (as the buses' G_*), stored with
+ * the project (project.c PROJ_CLOUDS_OFF), on the FX pages CLOUDS .. CLOUDS 3 (params.c CPD; page ids CP_ID0 + k) */
+enum {
+    CP_MODE,                    /* OFF, GRAN(ular), STRT (stretch: WSOLA), LOOP(ing delay), SPEC(tral) */
+    CP_POS, CP_SIZE, CP_PTCH,   /* POSITION, SIZE, PITCH (semitones -24 .. 24) */
+    CP_DENS, CP_TEX,            /* DENSITY, TEXTURE */
+    CP_FRZ, CP_QUAL,            /* FREEZE; quality: HI ST, HI MO, LO ST, LO MO (Clouds' 16 bit / 8 bit mu-law, stereo / mono) */
+    CP_WET, CP_SPRD, CP_FDBK, CP_REV,   /* BLEND: dry / wet, stereo spread, feedback, reverb */
+    CP_SRC,                     /* what goes through: PHYS (the PHYS parts), T1 .. T4, ALL */
+    CP_TRIG,                    /* TRIG: OFF, NOTE (a note of a part going through is Clouds' trigger, its keys its gate) */
+    CP_COUNT
+};
+#define CP_ID0 0xC0u            /* a page's id of CP_k (SC_GLOBAL pages; params.c page_desc) */
+
 /* stored parameters of an older layout -> today's P_* order. A store keeps np = the P_COUNT it was
  * written with; common parameters are only ever added just before P_E0, so the first np - 8 are
  * P_LEVEL.. in order and the last 8 are P_E0..P_E7; the parameters a store does not have take def[]
@@ -349,6 +363,7 @@ typedef struct {
                                   * zeroed default, is T1..T4 on channels 1..4), MCH_OMNI (any channel no track has), MCH_OFF
                                   * (none); mch_get / mch_set. The project's, in FUN10's spare bytes (project.c PROJ_MIDI_OFF);
                                   * MENU > MIDI > T1..T4 CHANNEL */
+    int16_t cp[CP_COUNT];        /* CLOUDS' knobs (fx_clouds.c), the project's (project.c PROJ_CLOUDS_OFF) */
 } song_t;
 #define ROUTE_SEL 1
 #define ROUTE_TRACK 5                /* G_ROUTE: TRACK, each track on its own channel (song.mch) */
@@ -357,6 +372,7 @@ typedef struct {
 #define MCH_N 18u                    /* channels 1..16, OMNI, OFF */
 
 static track_t trk[NTRK];        /* the instrument: four parts */
+static uint8_t cl_noteon;        /* CLOUDS' TRIG (fx_clouds.c): bit k, part k started a note since the last block */
 static song_t song;
 #define TSEL (&trk[song.sel])    /* the selected track */
 /* MIDI IN TRACK: track i's channel 0..15, MCH_OMNI or MCH_OFF (song.mch), and set */

@@ -190,6 +190,8 @@ static void ui_power_on(void)
     memset(up_bank, 0, sizeof up_bank);
     for (i = 0; i < G_COUNT; i++)
         song.g[i] = GP[i].def;
+    for (i = 0; i < CP_COUNT; i++)                /* (CLOUDS' knobs) */
+        song.cp[i] = CPD[i].def;
     undo_depth++;
     for (i = 0; i < NTRK; i++) {
         track_t *t = &trk[i];

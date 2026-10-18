@@ -758,6 +758,61 @@ static int midi_track_fmt(void)
     return bad;
 }
 
+/* RingsClouds: CLOUDS' knobs (song.cp) in 12 of the spare bytes before MIDI IN TRACK's (PROJ_CLOUDS_OFF): written only
+ * off the defaults (a project that never touched CLOUDS: the bytes 0, as before), round trip, a project of before (or a
+ * block out of range) loads the defaults (MODE OFF), saved and loaded on the device */
+static int clouds_fmt(void)
+{
+    int bad = 0, ok;
+    uint32_t i, end = 68u + NTRK * (P_COUNT + 2u + NSTEP * 9u) + sizeof(chain_config_t) + sizeof(motion_store_t);
+    project_t a, b;
+    static project_store_t st;
+    for (i = 0; i < CP_COUNT; i++)
+        song.cp[i] = CPD[i].def;
+    project_capture(&a);
+    ok = proj_pack(&st, &a) && end <= PROJ_CLOUDS_OFF && PROJ_CLOUDS_OFF + 12u == PROJ_MIDI_OFF;
+    for (i = PROJ_CLOUDS_OFF; i < PROJ_MIDI_OFF; i++)
+        ok &= st.raw[i] == 0u;
+    ok &= proj_import(&b, &st, sizeof st) && !memcmp(&a, &b, sizeof a) && b.cp[CP_MODE] == 0 && b.cp[CP_POS] == 64;
+    bad += check("CLOUDS: the defaults pack as before (12 bytes 0), load as the defaults", ok);
+
+    song.cp[CP_MODE] = 4; song.cp[CP_QUAL] = 3; song.cp[CP_FRZ] = 1; song.cp[CP_TRIG] = 1; song.cp[CP_SRC] = 5;
+    song.cp[CP_POS] = 0; song.cp[CP_SIZE] = 127; song.cp[CP_PTCH] = -24; song.cp[CP_DENS] = 1; song.cp[CP_TEX] = 2;
+    song.cp[CP_WET] = 3; song.cp[CP_SPRD] = 4; song.cp[CP_FDBK] = 5; song.cp[CP_REV] = 126;
+    project_capture(&a);
+    ok = proj_pack(&st, &a) && st.raw[PROJ_CLOUDS_OFF] == 0xC1u && st.raw[PROJ_CLOUDS_OFF + 1u] == (4u | 3u << 3 | 1u << 5 | 1u << 6) &&
+         st.raw[PROJ_CLOUDS_OFF + 2u] == 5u && st.raw[PROJ_CLOUDS_OFF + 5u] == 0u;
+    ok &= proj_import(&b, &st, sizeof st) && !memcmp(&a, &b, sizeof a);
+    song.cp[CP_PTCH] = 24;
+    project_capture(&a);
+    ok &= proj_pack(&st, &a) && proj_import(&b, &st, sizeof st) && b.cp[CP_PTCH] == 24;
+    bad += check("  every knob at its ends: round trip", ok);
+    st.raw[PROJ_CLOUDS_OFF + 2u] = 9u;                   /* SRC out of range: the defaults */
+    i = proj_hash(st.raw, PROJ_STORE_SIZE - 4u);
+    memcpy(st.raw + PROJ_STORE_SIZE - 4u, &i, 4);
+    ok = proj_import(&b, &st, sizeof st) && b.cp[CP_MODE] == 0 && b.cp[CP_SRC] == 0 && b.cp[CP_WET] == 64;
+    memset(st.raw + PROJ_CLOUDS_OFF, 0, 12);             /* a project of before: OFF */
+    i = proj_hash(st.raw, PROJ_STORE_SIZE - 4u);
+    memcpy(st.raw + PROJ_STORE_SIZE - 4u, &i, 4);
+    ok &= proj_import(&b, &st, sizeof st) && b.cp[CP_MODE] == 0 && b.cp[CP_REV] == 40;
+    bad += check("  a block out of range, or none (a project of before): the defaults, MODE OFF", ok);
+
+    song.cp[CP_MODE] = 3; song.cp[CP_WET] = 100;
+    project_save(3);
+    for (i = 0; i < CP_COUNT; i++)
+        song.cp[i] = 0;
+    project_load(3);
+    ok = song.cp[CP_MODE] == 3 && song.cp[CP_WET] == 100 && song.cp[CP_PTCH] == 24 && song.cp[CP_SRC] == 5;
+    for (i = 0; i < CP_COUNT; i++)
+        song.cp[i] = CPD[i].def;
+    project_save(3);
+    song.cp[CP_MODE] = 2;
+    project_load(3);
+    ok &= song.cp[CP_MODE] == 0 && song.cp[CP_DENS] == 100;
+    bad += check("  saved and loaded on the device: the knobs back; the defaults back", ok);
+    return bad;
+}
+
 int main(void)
 {
     int bad = 0;
@@ -766,6 +821,7 @@ int main(void)
     bad += motion128();
     bad += formats();
     bad += midi_track_fmt();
+    bad += clouds_fmt();
     printf(bad ? "ui: 1.2 FORMAT (FUN10) TEST FAILED\n" : "1.2 format (FUN10) tests passed\n");
     return bad != 0;
 }

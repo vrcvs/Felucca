@@ -162,6 +162,11 @@
 #                   built with cc (web/emu/native_check.c); the cost of 1 s of a heavy song against real time.
 # RINGS (tests/rings_ref.cpp, rings_fixed.c): PHYS's R.* models against Rings' float code when its sources are there
 #                   (RINGS=path of pichenettes/eurorack); tests/rings_cpu.sh: instructions per sample under valgrind.
+# CLOUDS (tests/clouds_ref.cpp, clouds_fixed.c): src/clouds_dsp.c against Clouds' float code (CLOUDS=path of
+#                   pichenettes/eurorack; its window.h patched for the WSOLA fix, PORTING_NOTES.md): at Clouds' 32 kHz with
+#                   its 4096-point FFT, and as the device runs it (44.1 kHz outside, 2048 points); tests/clouds_test.c: the
+#                   effect in the mix (OFF, modes, FREEZE, WET 0, SRC, MODE switched, the delay's line back, bit for bit
+#                   on two cores); tests/clouds_cpu.sh: instructions per sample under valgrind.
 # PHYS (tests/phys_test.c): stability over the whole parameter and pitch range, the worst-case cost against
 #                   the heaviest factory preset, demos in build/phys_demo/; tests/phys_ref.cpp compares the
 #                   fixed-point models with DaisySP's float originals when DaisySP is there (DAISYSP=path).
@@ -389,11 +394,17 @@ if [ -f build/gen/felucca_tables.h ]; then
     $CC -O2 -w -Ibuild/gen -Ifirmware/src -pthread -o "$OUT/dualcore_test" tests/dualcore_test.c -lm
     run "second core: 4 parts of every preset, mixes: bit for bit on one core and on two, every split" \
         "$OUT/dualcore_test"
+    $CC -O2 -w -Ibuild/gen -Ifirmware/src -pthread -o "$OUT/clouds_test" tests/clouds_test.c -lm
+    run "CLOUDS in the mix: modes, FREEZE, WET 0, SRC, MODE switched, the delay's line back, one core and two" \
+        "$OUT/clouds_test"
     if [ -n "$TSAN" ]; then                     # TSAN=1: the same under ThreadSanitizer (~6 min): shared state
         TSAN_CC="cc -O1 -g -w -Ibuild/gen -Ifirmware/src -fsanitize=thread -pthread"
         $TSAN_CC -o "$OUT/dualcore_tsan" tests/dualcore_test.c -lm
         run "second core under ThreadSanitizer: 4 parts of every preset, mixes" \
             env TSAN_OPTIONS=halt_on_error=1 "$OUT/dualcore_tsan"
+        $TSAN_CC -o "$OUT/clouds_tsan" tests/clouds_test.c -lm
+        run "second core under ThreadSanitizer: CLOUDS on core 1 beside the parts" \
+            env TSAN_OPTIONS=halt_on_error=1 "$OUT/clouds_tsan"
     fi
     # Felucca-Engines (firmware/engines, MIT): its own test, then its standalone host built with Felucca's generated
     # tables against its golden renders (the same hashes: build/gen/felucca_tables.h has the engines' tables)
@@ -434,6 +445,26 @@ if [ -f build/gen/felucca_tables.h ]; then
         done
     else
         echo "== skip RINGS reference test (no Rings sources: set RINGS to a pichenettes/eurorack checkout)"
+    fi
+    # CLOUDS (tests/clouds_ref.cpp): src/clouds_dsp.c against Clouds' float code (pichenettes/eurorack, MIT:
+    # CLOUDS=path of a checkout). Upstream's window.h lost `done_ = false;` in Window::Start (STRETCH silent): the
+    # reference is built with it put back (build/host/clouds_override)
+    E=${CLOUDS:-${RINGS:-vendor/eurorack}}
+    if [ -f "$E/clouds/dsp/granular_processor.cc" ] && command -v c++ >/dev/null 2>&1; then
+        mkdir -p "$OUT/clouds_override/clouds/dsp" "$OUT/cl4096"
+        awk '{ print } /^    phase_ = 0;$/ { print "    done_ = false;" }' "$E/clouds/dsp/window.h" \
+            > "$OUT/clouds_override/clouds/dsp/window.h"
+        python3 tools/gen_clouds_tables.py --fft 4096 "$OUT/cl4096/clouds_tables.h" >/dev/null
+        $CC -O2 -w -I"$OUT/cl4096" -Ifirmware/src -c -o "$OUT/clouds_fixed.o" tests/clouds_fixed.c
+        $CC -O2 -w -DCF_DEV -Ibuild/gen -Ifirmware/src -c -o "$OUT/clouds_fixed_dev.o" tests/clouds_fixed.c
+        c++ -O2 -std=c++14 -w -DTEST -I"$OUT/clouds_override" -I"$E" -o "$OUT/clouds_ref" tests/clouds_ref.cpp \
+            "$E/clouds/dsp/correlator.cc" "$E/clouds/dsp/granular_processor.cc" "$E/clouds/dsp/mu_law.cc" \
+            "$E/clouds/resources.cc" "$E"/clouds/dsp/pvoc/*.cc "$E/stmlib/dsp/atan.cc" "$E/stmlib/dsp/units.cc" \
+            "$E/stmlib/utils/random.cc" "$OUT/clouds_fixed.o" "$OUT/clouds_fixed_dev.o" -lm
+        run "CLOUDS: the four modes, FREEZE, BLEND, QUALITY against the float original (32 kHz and as on the device)" \
+            "$OUT/clouds_ref"
+    else
+        echo "== skip CLOUDS reference test (no Clouds sources: set CLOUDS to a pichenettes/eurorack checkout)"
     fi
     $CC -O2 -w -Ibuild/gen -Ifirmware/src -o "$OUT/drum_test" tests/drum_test.c -lm
     mkdir -p build/drum_demo

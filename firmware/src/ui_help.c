@@ -26,7 +26,11 @@ static const struct { const char *title, *hint; } HELP_PAGE[] = {
     {"INSERT 2", "[K1]DRY / WET[FX]DLY"},
     {"DLY", "[K1-4]ALL TRACKS[FX]REVERB"},
     {"REVERB", "[K1]ROOM SPRING HALL[FX]CHORUS"},
-    {"CHORUS", "[K1-4]ALL TRACKS[FX]FX"},
+    {"CHORUS", "[K1-4]ALL TRACKS[FX]CLOUDS"},
+    {"CLOUDS", "[K1]MODE[K2]POSITION[FX]CLOUDS 2"},   /* (RingsClouds: fx_clouds.c) */
+    {"CLOUDS 2", "[K3]FREEZE[K4]QUALITY"},
+    {"BLEND", "[K1]DRY / WET[K4]REVERB"},
+    {"CLOUDS 3", "[K1]SOURCE[K2]TRIGGER[FX]FX"},
     {"SCL", "[K2]SCALE[K3]QUANTIZE[SCL]CHORDS"},
     {"CHORD", "[K1]CHORD[KEYS]ONE FINGER[SCL]SCL"},
     {"EDIT 1", H_EDIT},

@@ -5,7 +5,7 @@
  * the others. Included before the firmware: tests/dualcore_test.c, tests/regress.c built with -DC1_HOST
  * (run_tests.sh). Built with -fsanitize=thread, any state two parts share while they render is reported as a race.
  * env C1_MASK: which parts go to the thread each block: "auto" (fx.c mix_split, the firmware's choice), "rot"
- * (the default: every split in turn, block by block), or a fixed mask (1..14) */
+ * (the default: every split in turn, block by block), or a fixed mask (1..30: bit 4 CLOUDS, fx.c C1_CLD) */
 #ifndef FELUCCA_CPU2
 #define FELUCCA_CPU2 1                              /* (the dual-core build: src/core.h) */
 #endif
@@ -77,9 +77,9 @@ static uint32_t c1h_split(void)
     if (e && !strcmp(e, "auto"))
         return mix_split();
     if (e && *e && strcmp(e, "rot"))
-        return (uint32_t)atoi(e) & 15u;
-    return (b * 7u + 3u) % 15u;                     /* every split in turn (0 too: one core), not in step with the
-                                                     * patterns */
+        return (uint32_t)atoi(e) & 31u;
+    return (b * 7u + 3u) % 31u;                     /* every split in turn (0 too: one core; bit 4: CLOUDS), not in
+                                                     * step with the patterns */
 }
 
 #define C1_ON() (!c1h_off)

@@ -73,6 +73,8 @@ static void host_tracks_init(void)                /* as felucca_init: defaults, 
     uint32_t i, k;
     for (i = 0; i < G_COUNT; i++)
         song.g[i] = GP[i].def;
+    for (i = 0; i < CP_COUNT; i++)                /* (CLOUDS' knobs: MODE OFF) */
+        song.cp[i] = CPD[i].def;
     song.g[G_RTYPE] = 0;                          /* ROOM, the power-on reverb until 1.2: the renders (goldens) as
                                                    * before, ROOM bit for bit; HALL, the default since: reverb_test.c */
     for (k = 0; k < NTRK; k++) {
@@ -842,6 +844,7 @@ int main(int argc, char **argv)
     if (getenv("CHORD"))
         nk = atoi(getenv("CHORD")) > 4 ? (uint32_t)atoi(getenv("CHORD")) : 4u;
     for (i = 0; i < G_COUNT; i++) song.g[i] = GP[i].def;
+    for (i = 0; i < CP_COUNT; i++) song.cp[i] = CPD[i].def;
     for (i = 0; i < P_E0; i++) inst.p[i] = TP[i].def;
     inst.eng_req = inst.engine = (uint8_t)eng;
     eng_mem_claim(&inst);

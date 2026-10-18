@@ -313,6 +313,7 @@ static void voice_start(track_t *t, voice_t *v, uint32_t note, uint32_t vel, int
         t->sp_alt ^= 1u;                                /* sounding voice keeps its side (no jump) */
     }                                                   /* sounding: the attack starts from the current level */
     e->note_on(t, v);
+    cl_noteon |= (uint8_t)(1u << ((uint32_t)(t - trk) & 7u));   /* (CLOUDS' TRIG NOTE: fx_clouds.c) */
     if (sounding && !e->sampled) {                     /* retrigger / steal: keep phases and filter */
         v->ph[0] = ph0;                                 /* states (resetting them clicks) */
         v->ph[1] = ph1;

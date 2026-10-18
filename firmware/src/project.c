@@ -128,9 +128,11 @@ typedef struct {
     motion_store_t motion;
     uint8_t fm6[NTRK][FM6_PACKED];             /* each track's FM6 patch, packed (eng_fm6.c) */
     uint8_t mch[NTRK];                         /* 1.5.5: MIDI IN TRACK's channels, as song.mch (PROJ_MIDI_OFF) */
+    int16_t cp[CP_COUNT];                      /* CLOUDS' knobs, as song.cp (PROJ_CLOUDS_OFF) */
     char name[PROJ_NAME_LEN];                  /* the project's name: upper-case ASCII 32..126, 0-padded; "" = none */
     uint32_t sum;
 } project_t;
+static void proj_clouds_default(project_t *q);
 /* Historical FUN5/6 types are frozen, independent of today's P_COUNT/step_t. */
 typedef struct { uint8_t note[4], n, time, flags, vel, hit, acc; } step10_t;
 typedef struct { int16_t p[69]; uint8_t engine, preset; step10_t step[NSTEP]; uint8_t lane[NLANE][5]; } proj_trk_v5_t;
@@ -165,6 +167,13 @@ _Static_assert(sizeof(project_v5_t) == 3352u && sizeof(project_v6_t) == 3388u, "
  * channels make, else CH1-4), which is all a firmware before 1.5.5 reads (these bytes it never did): a TRACK project plays
  * there as that block. Every project before has them 0: channels 1..4, MIDI IN as its G_ROUTE says */
 #define PROJ_MIDI_OFF (PROJ_FM6_OFF - 3u)
+/* RingsClouds: CLOUDS' knobs (song.cp, fx_clouds.c), 12 of the 13 spare bytes left before MIDI IN TRACK's (one left;
+ * a later track parameter needs a format change now). Byte 0 0xC1 marks the block; then MODE | QUAL << 3 | FRZ << 5 |
+ * TRIG << 6, SRC, and POSN SIZE PTCH + 24 DENS TEXT WET SPRD FDBK REV. Written only when a knob is off its default, so a
+ * project that never touched CLOUDS keeps the 0 bytes of every FUN10 before (and loads as before anywhere); a block
+ * missing (0) or out of range loads the defaults (MODE OFF). A firmware before reads none of it (CLOUDS OFF there) */
+#define PROJ_CLOUDS_OFF (PROJ_MIDI_OFF - 12u)
+#define PROJ_CLOUDS_TAG 0xC1u
 typedef union { uint32_t align; uint8_t raw[PROJ_STORE_SIZE]; } project_store_t;
 _Static_assert(G_COUNT == 27u, "FUN7 globals retain original IDs");
 _Static_assert(sizeof(project_store_t) == 3840u && PROJ_STORE_V7 == sizeof(project_v6_t), "FUN10 / FUN7 sizes");
@@ -395,6 +404,7 @@ static int proj_from_v4(project_t *q, const project_v4_t *v4, int n)
     memset(q, 0, sizeof *q);
     q->magic = PROJ_MAGIC;
     q->size = sizeof *q;
+    proj_clouds_default(q);
     memcpy(q->g, v4->g, sizeof q->g);
     proj_rtype_room(q->g);
     q->sel = v4->sel;
@@ -417,6 +427,7 @@ static int proj_from_v3(project_t *q, const project_v3_t *v3, int n)
     memset(q, 0, sizeof *q);
     q->magic = PROJ_MAGIC;
     q->size = sizeof *q;
+    proj_clouds_default(q);
     memcpy(q->g, v3->g, sizeof q->g);
     proj_rtype_room(q->g);
     q->sel = v3->sel;
@@ -438,6 +449,7 @@ static int proj_from_v2(project_t *q, const project_v2_t *v2, int n)
     memset(q, 0, sizeof *q);
     q->magic = PROJ_MAGIC;
     q->size = sizeof *q;
+    proj_clouds_default(q);
     proj_g_from_v2(q->g, v2->g);
     q->sel = v2->sel;
     for (i = 0; i < NTRK; i++)
@@ -457,6 +469,7 @@ static int proj_from_v1(project_t *q, const project_v1_t *v1, int n)
     memset(q, 0, sizeof *q);
     q->magic = PROJ_MAGIC;
     q->size = sizeof *q;
+    proj_clouds_default(q);
     proj_g_from_v2(q->g, v1->g);
     q->parts = NPART;                          /* (format 1 had no track 4) */
     proj_trk_from_v2(&q->t[0], &v1->t);
@@ -527,6 +540,7 @@ static int proj_import_any(project_t *q, const void *b, int n)
     if (!proj_import_old(q, b, n))
         return 0;
     proj_fm6_init(q);
+    proj_clouds_default(q);                             /* (CLOUDS OFF: no older format has it) */
     return 1;
 }
 static int proj_import_old(project_t *q, const void *b, int n)
@@ -541,6 +555,7 @@ static int proj_import_old(project_t *q, const void *b, int n)
             v->size == bytes && ((const uint32_t *)b)[bytes / 4u - 1u] == proj_hash(b, bytes - 4u)) {
             memset(q, 0, sizeof *q);
             q->magic = PROJ_MAGIC; q->size = sizeof *q;
+            proj_clouds_default(q);
             memcpy(q->g, v->g, sizeof q->g);
             proj_rtype_room(q->g);
             q->sel = v->sel; q->parts = v->parts; q->phys = v->phys;
@@ -604,6 +619,53 @@ static void proj_midi_pack(uint8_t *b, const project_t *q)
     }
     b[PROJ_MIDI_OFF] = (uint8_t)v; b[PROJ_MIDI_OFF + 1u] = (uint8_t)(v >> 8); b[PROJ_MIDI_OFF + 2u] = (uint8_t)(v >> 16);
 }
+static const uint8_t PROJ_CP_KNOB[9] = {CP_POS, CP_SIZE, CP_PTCH, CP_DENS, CP_TEX, CP_WET, CP_SPRD, CP_FDBK, CP_REV};
+static void proj_clouds_default(project_t *q)
+{
+    uint32_t i;
+    for (i = 0; i < CP_COUNT; i++)
+        q->cp[i] = CPD[i].def;
+}
+static int proj_clouds_ok(const int16_t *cp)
+{
+    uint32_t i;
+    for (i = 0; i < CP_COUNT; i++)
+        if (cp[i] < CPD[i].min || cp[i] > CPD[i].max)
+            return 0;
+    return 1;
+}
+static void proj_clouds_pack(uint8_t *b, const project_t *q)
+{
+    uint32_t i, any = 0;
+    uint8_t *c = b + PROJ_CLOUDS_OFF;
+    for (i = 0; i < CP_COUNT; i++)
+        any |= q->cp[i] != CPD[i].def;
+    if (!any)
+        return;                                         /* (the bytes stay 0: as every project before) */
+    c[0] = PROJ_CLOUDS_TAG;
+    c[1] = (uint8_t)(q->cp[CP_MODE] | q->cp[CP_QUAL] << 3 | q->cp[CP_FRZ] << 5 | q->cp[CP_TRIG] << 6);
+    c[2] = (uint8_t)q->cp[CP_SRC];
+    for (i = 0; i < 9u; i++)
+        c[3u + i] = (uint8_t)(q->cp[PROJ_CP_KNOB[i]] - CPD[PROJ_CP_KNOB[i]].min);
+}
+static void proj_clouds_unpack(project_t *q, const uint8_t *b)
+{
+    const uint8_t *c = b + PROJ_CLOUDS_OFF;
+    int16_t cp[CP_COUNT];
+    uint32_t i;
+    proj_clouds_default(q);
+    if (c[0] != PROJ_CLOUDS_TAG)
+        return;
+    cp[CP_MODE] = c[1] & 7u;
+    cp[CP_QUAL] = c[1] >> 3 & 3u;
+    cp[CP_FRZ] = c[1] >> 5 & 1u;
+    cp[CP_TRIG] = c[1] >> 6 & 1u;
+    cp[CP_SRC] = c[2];
+    for (i = 0; i < 9u; i++)
+        cp[PROJ_CP_KNOB[i]] = (int16_t)(c[3u + i] + CPD[PROJ_CP_KNOB[i]].min);
+    if (proj_clouds_ok(cp))
+        memcpy(q->cp, cp, sizeof cp);
+}
 static void proj_midi_unpack(project_t *q, const uint8_t *b)
 {
     uint32_t k, v = b[PROJ_MIDI_OFF] | (uint32_t)b[PROJ_MIDI_OFF + 1u] << 8 | (uint32_t)b[PROJ_MIDI_OFF + 2u] << 16, f;
@@ -623,7 +685,7 @@ static int proj_pack(project_store_t *out, const project_t *q)
     for (t = 0; t < NTRK; t++)
         for (i = 0; i < FM6_PACKED; i++)
             if (q->fm6[t][i] > 127u) return 0;
-    if (!chain_valid(&q->chain) || !motion_valid(&q->motion) || P_COUNT > 127u) return 0;
+    if (!chain_valid(&q->chain) || !motion_valid(&q->motion) || P_COUNT > 127u || !proj_clouds_ok(q->cp)) return 0;
     memset(out, 0, sizeof *out); memcpy(b, &magic, 4); memcpy(b + 4, &size, 4);
     memcpy(b + 8, q->g, sizeof q->g); b[62] = q->sel; b[63] = q->parts; b[64] = q->phys; b[66] = P_COUNT;
     for (t = 0; t < NTRK; t++) {
@@ -647,10 +709,11 @@ static int proj_pack(project_store_t *out, const project_t *q)
             b[pos++] = (uint8_t)(s->probability | (r >> 1) << 7);
         }
     }
-    if (pos + sizeof q->chain + sizeof q->motion > PROJ_MIDI_OFF) return 0;
+    if (pos + sizeof q->chain + sizeof q->motion > PROJ_CLOUDS_OFF) return 0;
     memcpy(b + pos, &q->chain, sizeof q->chain); pos += sizeof q->chain;
     memcpy(b + pos, &q->motion, sizeof q->motion);
     proj_midi_pack(b, q);
+    proj_clouds_pack(b, q);
     memcpy(b + PROJ_FM6_OFF, q->fm6, sizeof q->fm6);
     {   /* the name (0-padded; stops at the first 0) */
         char n[PROJ_NAME_LEN + 1u];
@@ -752,6 +815,10 @@ static int proj_unpack(project_t *q, const uint8_t *b, uint32_t st)
     if (!proj_motion_ids(&q->motion, np) || !chain_valid(&q->chain) || !motion_valid(&q->motion)) return 0;
     if (v10)
         proj_midi_unpack(q, b);                         /* (1.5.5: 0 in every FUN10 before, FUN9..FUN7 have none) */
+    if (v10)
+        proj_clouds_unpack(q, b);                       /* (CLOUDS: 0 in every FUN10 before -> OFF) */
+    else
+        proj_clouds_default(q);
     for (t = 0; t < NTRK; t++) {
         if (v7)
             memcpy(q->fm6[t], FM6_INIT, FM6_PACKED);
@@ -877,6 +944,7 @@ static void project_capture(project_t *p)
     }
     p->motion = motion;
     memcpy(p->mch, song.mch, sizeof p->mch);
+    memcpy(p->cp, song.cp, sizeof p->cp);
     motion_unguard(f);
     memcpy(p->name, proj_name, str_len(proj_name));
     p->sum = proj_sum(p);
@@ -1077,6 +1145,8 @@ static int project_restore_runtime(const project_t *input)
             song.g[i] = (int16_t)clamp(p->g[i], GP[i].min, GP[i].max);
     for (k = 0; k < NTRK; k++)                          /* MIDI IN TRACK's channels (1.5.5; 0, channels 1..4, before) */
         song.mch[k] = (uint8_t)(p->mch[k] < MCH_N ? p->mch[k] : 0u);
+    for (k = 0; k < CP_COUNT; k++)                      /* CLOUDS (a project of before: its defaults, OFF) */
+        song.cp[k] = (int16_t)(proj_clouds_ok(p->cp) ? p->cp[k] : CPD[k].def);
     midi_route = MIDI_ROUTE_AGAIN;                      /* (events_block: what the channels no longer hear let go) */
     for (k = 0; k < NTRK; k++) {
         track_t *t = &trk[k];
@@ -1328,6 +1398,7 @@ static uint32_t autosave_sig(void)
         if (i != G_SLOT && i != G_NAME && i != G_LOAD && i != G_SAVE)
             h = as_mix(h, &song.g[i], sizeof song.g[i]);
     h = as_mix(h, song.mch, sizeof song.mch);           /* (1.5.5: MIDI IN TRACK's channels, the project's) */
+    h = as_mix(h, song.cp, sizeof song.cp);             /* (CLOUDS' knobs, the project's) */
     h = as_mix(h, &motion, sizeof motion);
     h = as_mix(h, &chain_config, sizeof chain_config);
     return as_mix(h, proj_name, sizeof proj_name);

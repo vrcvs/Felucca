@@ -84,6 +84,7 @@ static void reset(void)
     transport_req = panic_req = 0; sx_ready = sx_collect = sx_busy = 0;
     so_r = so_w = mi_r = mi_w = 0; midi_in_overflow = 0; usb.config = 1;
     for (i = 0; i < G_COUNT; i++) song.g[i] = GP[i].def;
+    for (i = 0; i < CP_COUNT; i++) song.cp[i] = CPD[i].def;
     for (t = 0; t < NTRK; t++) {
         track_defaults(&trk[t]); set_engine_of(&trk[t], 0); apply_preset_to(&trk[t], 0);
         trk[t].engine = trk[t].eng_req; track_defaults_steps(&trk[t]);
