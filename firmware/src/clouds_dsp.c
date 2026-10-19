@@ -312,11 +312,11 @@ typedef struct { int32_t s1, s2; } cl_svf_t;
 
 static void cl_svf_set(cl_svfk_t *k, uint32_t f, int32_t q16)   /* f cycles per sample, Q32 (< 0.5) */
 {
-    int64_t den;
+        uint64_t den;
     k->g = px_fasttan(f);
-    k->r = (int32_t)(((int64_t)1 << 44) / q16);
-    den = ((int64_t)1 << 28) + (((int64_t)k->r * k->g) >> 28) + (((int64_t)k->g * k->g) >> 28);
-    k->h = (int32_t)(((int64_t)1 << 58) / den);
+    k->r = (int32_t)(((uint64_t)1 << 44) / (uint32_t)q16);
+    den = ((uint64_t)1 << 28) + (((uint64_t)k->r * (uint32_t)k->g) >> 28) + (((uint64_t)(uint32_t)k->g * (uint32_t)k->g) >> 28);
+    k->h = (int32_t)(((uint64_t)1 << 58) / den);
 }
 
 /* in place on n samples of x (stride 2): mode 0 low-pass, 1 high-pass */
