@@ -299,13 +299,21 @@ def check(img, syms, dis, rt):
         errors.append(".c1_text: the second core's waiting loop is missing (firmware/hal/fm1_cpu1.h fm1_c1_main)")
     else:
         notes.append(f".c1_text: {c1_insns} insns, only its job called")
+    func = None
     for ln in dis.splitlines():     # nothing may call or load an address in the chip ROM
+        fm = re.match(r"^\s*[0-9a-f]+ <([^>]+)>:$", ln)
+        if fm:
+            func = fm.group(1).split("+")[0]
+            continue
         mm = LINE.match(ln)
         if not mm:
             continue
         for v in re.findall(r"= (-?\d+) <|call -?\d+ <[^:>]*: ([0-9a-f]+) >", mm.group(3)):
             val = (int(v[0]) & 0xFFFFFFFF) if v[0] else int(v[1], 16) & 0xFFFFFFFF
-            if 0xFFC00000 <= val < 0xFFD00000:
+            # clang folds (shape - 64225) * 55 in rg_dp_run to shape * 55 + 0xffca19a9.
+            # This one immediate is arithmetic, not a ROM pointer; keep checking every other value.
+            arithmetic_constant = func == "rg_dp_run" and val == 0xffca19a9
+            if 0xFFC00000 <= val < 0xFFD00000 and not arithmetic_constant:
                 errors.append(f"reference to ROM address {val:#010x}: {ln.strip()}")
     if len(img) > APP_SLOT:
         errors.append(f"image {len(img)} B exceeds the app slot")
