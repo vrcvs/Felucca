@@ -1,3 +1,18 @@
+unsigned long long __udivdi3(unsigned long long n, unsigned long long d);
+long long __divdi3(long long n, long long d)
+{
+    unsigned long long un, ud, q;
+    int negative;
+    if (!d)
+        return 0;
+    negative = (n < 0) != (d < 0);
+    un = n < 0 ? 0ULL - (unsigned long long)n : (unsigned long long)n;
+    ud = d < 0 ? 0ULL - (unsigned long long)d : (unsigned long long)d;
+    q = __udivdi3(un, ud);
+    return negative ? (long long)(0ULL - q) : (long long)q;
+}
+
+unsigned long long __udivdi3(unsigned long long n, unsigned long long d);
 /* JieLi's freestanding link omits the compiler's 64-bit unsigned divide helper. */
 unsigned long long __udivdi3(unsigned long long n, unsigned long long d)
 {
