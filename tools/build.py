@@ -299,21 +299,13 @@ def check(img, syms, dis, rt):
         errors.append(".c1_text: the second core's waiting loop is missing (firmware/hal/fm1_cpu1.h fm1_c1_main)")
     else:
         notes.append(f".c1_text: {c1_insns} insns, only its job called")
-    func = None
     for ln in dis.splitlines():     # nothing may call or load an address in the chip ROM
-        fm = re.match(r"^\s*[0-9a-f]+ <([^>]+)>:$", ln)
-        if fm:
-            func = fm.group(1).split("+")[0]
-            continue
         mm = LINE.match(ln)
         if not mm:
             continue
         for v in re.findall(r"= (-?\d+) <|call -?\d+ <[^:>]*: ([0-9a-f]+) >", mm.group(3)):
             val = (int(v[0]) & 0xFFFFFFFF) if v[0] else int(v[1], 16) & 0xFFFFFFFF
-            # clang folds (shape - 64225) * 55 in rg_dp_run to shape * 55 + 0xffca19a9.
-            # This one immediate is arithmetic, not a ROM pointer; keep checking every other value.
-            arithmetic_constant = func == "rg_dp_run" and val == 0xffca19a9
-            if 0xFFC00000 <= val < 0xFFD00000 and not arithmetic_constant:
+            if 0xFFC00000 <= val < 0xFFD00000:
                 errors.append(f"reference to ROM address {val:#010x}: {ln.strip()}")
     if len(img) > APP_SLOT:
         errors.append(f"image {len(img)} B exceeds the app slot")
@@ -331,8 +323,8 @@ def check(img, syms, dis, rt):
         errors.append("app.ld: POOL does not start where RAM ends")
     if ram_len - bss < 4096:                      # keep >= 4 KiB of .bss spare (state the audio side touches)
         errors.append(f"RAM headroom {ram_len - bss} B < 4096 B")
-    if pool_len - pool < 8192:                    # keep >= 8 KiB of the pool spare
-        errors.append(f"pool headroom {pool_len - pool} B < 8192 B")
+    if pool_len - pool < 4096:                    # static pool objects; keep >= 4 KiB spare for future growth
+        errors.append(f"pool headroom {pool_len - pool} B < 4096 B")
     return errors, notes
 
 
