@@ -1,3 +1,21 @@
+/* JieLi's freestanding link omits the compiler's 64-bit unsigned divide helper. */
+unsigned long long __udivdi3(unsigned long long n, unsigned long long d)
+{
+    unsigned long long q = 0, r = 0;
+    int i;
+    if (!d)
+        return ~0ULL;
+    for (i = 63; i >= 0; --i) {
+        unsigned long long carry = r >> 63;
+        r = (r << 1) | ((n >> i) & 1ULL);
+        if (carry || r >= d) {
+            r -= d;
+            q |= 1ULL << i;
+        }
+    }
+    return q;
+}
+
 /* SPDX-License-Identifier: GPL-3.0-only
  * Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments */
 /* The few libc routines the compiler may call implicitly (struct copies,
